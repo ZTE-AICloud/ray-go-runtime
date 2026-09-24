@@ -29,6 +29,7 @@ from ray._common.network_utils import (
     node_ip_address_from_perspective,
     parse_address,
 )
+from ray._private.ray_constants import ENABLE_GO_LOG_MONITOR
 from ray._private.resource_and_label_spec import ResourceAndLabelSpec
 from ray._private.resource_isolation_config import ResourceIsolationConfig
 from ray._raylet import GcsClient, GcsClientOptions, NodeID
@@ -1178,7 +1179,8 @@ def start_log_monitor(
     session_dir: str,
     logs_dir: str,
     gcs_address: str,
-    node_ip_address: str,
+    cluster_id_hex: Optional[str] = None,
+    node_ip_address: Optional[str] = None,
     fate_share: Optional[bool] = None,
     max_bytes: int = 0,
     backup_count: int = 0,
@@ -1191,6 +1193,7 @@ def start_log_monitor(
         session_dir: The session directory.
         logs_dir: The directory of logging files.
         gcs_address: GCS address for pubsub.
+        cluster_id_hex: Cluster ID in hex, required for the Go log monitor path.
         node_ip_address: The IP address of the node we are connected to.
         fate_share: Whether to share fate between log_monitor
             and this process.
@@ -1206,19 +1209,37 @@ def start_log_monitor(
     Returns:
         ProcessInfo for the process that was started.
     """
-    log_monitor_filepath = os.path.join(RAY_PATH, RAY_PRIVATE_DIR, "log_monitor.py")
+    if ENABLE_GO_LOG_MONITOR:
+        if not cluster_id_hex:
+            raise ValueError(
+                "cluster_id_hex is required when Go log monitor is enabled"
+            )
+        command = [
+            RAYGO_EXECUTABLE,
+            "log-monitor",
+            f"--session-dir={session_dir}",
+            f"--logs-dir={logs_dir}",
+            f"--gcs-address={gcs_address}",
+            f"--cluster-id-hex={cluster_id_hex}",
+            f"--logging-rotate-bytes={max_bytes}",
+            f"--logging-rotate-backup-count={backup_count}",
+        ]
+        if node_ip_address:
+            command.append(f"--node-ip-address={node_ip_address}")
+    else:
+        log_monitor_filepath = os.path.join(RAY_PATH, RAY_PRIVATE_DIR, "log_monitor.py")
 
-    command = [
-        sys.executable,
-        "-u",
-        log_monitor_filepath,
-        f"--session-dir={session_dir}",
-        f"--logs-dir={logs_dir}",
-        f"--gcs-address={gcs_address}",
-        f"--node-ip-address={node_ip_address}",
-        f"--logging-rotate-bytes={max_bytes}",
-        f"--logging-rotate-backup-count={backup_count}",
-    ]
+        command = [
+            sys.executable,
+            "-u",
+            log_monitor_filepath,
+            f"--session-dir={session_dir}",
+            f"--logs-dir={logs_dir}",
+            f"--gcs-address={gcs_address}",
+            f"--node-ip-address={node_ip_address}",
+            f"--logging-rotate-bytes={max_bytes}",
+            f"--logging-rotate-backup-count={backup_count}",
+        ]
 
     if stdout_filepath:
         command.append(f"--stdout-filepath={stdout_filepath}")
@@ -1949,47 +1970,62 @@ def start_raylet(
     if is_head_node:
         dashboard_agent_command.append("--head")
 
-    runtime_env_agent_command = [
-        *_build_python_executable_command_memory_profileable(
-            ray_constants.PROCESS_TYPE_RUNTIME_ENV_AGENT, session_dir
-        ),
-        os.path.join(RAY_PATH, "_private", "runtime_env", "agent", "main.py"),
-        f"--node-id={node_id}",
-        f"--node-ip-address={node_ip_address}",
-        f"--runtime-env-agent-port={runtime_env_agent_port}",
-        f"--session-dir={session_dir}",
-        f"--gcs-address={gcs_address}",
-        f"--cluster-id-hex={cluster_id}",
-        f"--runtime-env-dir={resource_dir}",
-        f"--logging-rotate-bytes={max_bytes}",
-        f"--logging-rotate-backup-count={backup_count}",
-        f"--log-dir={log_dir}",
-        f"--temp-dir={temp_dir}",
-    ]
-    if runtime_env_agent_stdout_filepath:
-        runtime_env_agent_command.append(
-            f"--stdout-filepath={runtime_env_agent_stdout_filepath}"
+    if ray_constants.ENABLE_GO_RUNTIME_ENV_AGENT:
+        runtime_env_agent_command = build_go_runtime_env_agent_command(
+            node_ip_address,
+            runtime_env_agent_port,
+            gcs_address,
+            cluster_id,
+            resource_dir,
+            max_bytes,
+            backup_count,
+            log_dir,
+            temp_dir,
+            runtime_env_agent_stdout_filepath,
+            runtime_env_agent_stderr_filepath,
         )
-    if runtime_env_agent_stderr_filepath:
-        runtime_env_agent_command.append(
-            f"--stderr-filepath={runtime_env_agent_stderr_filepath}"
-        )
-    if runtime_env_agent_log_filepath:
-        runtime_env_agent_command.append(
-            f"--logging-filename={os.path.basename(runtime_env_agent_log_filepath)}"
-        )
-    if (
-        runtime_env_agent_stdout_filepath is None
-        and runtime_env_agent_stderr_filepath is None
-    ):
-        # If not redirecting logging to files, unset log filename.
-        # This will cause log records to go to stderr.
-        runtime_env_agent_command.append("--logging-filename=")
-        # Use stderr log format with the component name as a message prefix.
-        logging_format = ray_constants.LOGGER_FORMAT_STDERR.format(
-            component=ray_constants.PROCESS_TYPE_RUNTIME_ENV_AGENT
-        )
-        runtime_env_agent_command.append(f"--logging-format={logging_format}")
+    else:
+        runtime_env_agent_command = [
+            *_build_python_executable_command_memory_profileable(
+                ray_constants.PROCESS_TYPE_RUNTIME_ENV_AGENT, session_dir
+            ),
+            os.path.join(RAY_PATH, "_private", "runtime_env", "agent", "main.py"),
+            f"--node-id={node_id}",
+            f"--node-ip-address={node_ip_address}",
+            f"--runtime-env-agent-port={runtime_env_agent_port}",
+            f"--session-dir={session_dir}",
+            f"--gcs-address={gcs_address}",
+            f"--cluster-id-hex={cluster_id}",
+            f"--runtime-env-dir={resource_dir}",
+            f"--logging-rotate-bytes={max_bytes}",
+            f"--logging-rotate-backup-count={backup_count}",
+            f"--log-dir={log_dir}",
+            f"--temp-dir={temp_dir}",
+        ]
+        if runtime_env_agent_stdout_filepath:
+            runtime_env_agent_command.append(
+                f"--stdout-filepath={runtime_env_agent_stdout_filepath}"
+            )
+        if runtime_env_agent_stderr_filepath:
+            runtime_env_agent_command.append(
+                f"--stderr-filepath={runtime_env_agent_stderr_filepath}"
+            )
+        if runtime_env_agent_log_filepath:
+            runtime_env_agent_command.append(
+                f"--logging-filename={os.path.basename(runtime_env_agent_log_filepath)}"
+            )
+        if (
+            runtime_env_agent_stdout_filepath is None
+            and runtime_env_agent_stderr_filepath is None
+        ):
+            # If not redirecting logging to files, unset log filename.
+            # This will cause log records to go to stderr.
+            runtime_env_agent_command.append("--logging-filename=")
+            # Use stderr log format with the component name as a message prefix.
+            logging_format = ray_constants.LOGGER_FORMAT_STDERR.format(
+                component=ray_constants.PROCESS_TYPE_RUNTIME_ENV_AGENT
+            )
+            runtime_env_agent_command.append(f"--logging-format={logging_format}")
 
     command = [
         RAYLET_EXECUTABLE,
@@ -2263,6 +2299,40 @@ def build_go_worker_command(
     # This matches the behavior of Python's start_worker_command
     command.append("RAY_WORKER_DYNAMIC_OPTION_PLACEHOLDER")
 
+    return command
+
+
+def build_go_runtime_env_agent_command(
+    node_ip_address: str,
+    runtime_env_agent_port: str,
+    gcs_address: str,
+    cluster_id: str,
+    resource_dir: str,
+    max_bytes: int,
+    backup_count: int,
+    log_dir: str,
+    temp_dir: str,
+    runtime_env_agent_stdout_filepath: Optional[str] = None,
+    runtime_env_agent_stderr_filepath: Optional[str] = None,
+):
+    command = [
+        RAYGO_EXECUTABLE,
+        ray_constants.RAYGO_AVAILABLE_COMMAND_RUNTIME_ENV_AGENT,
+        f"--node-ip-address={node_ip_address}",
+        f"--runtime-env-agent-port={runtime_env_agent_port}",
+        f"--gcs-address={gcs_address}",
+        f"--cluster-id-hex={cluster_id}",
+        f"--runtime-env-dir={resource_dir}",
+        f"--logging-rotate-bytes={max_bytes}",
+        f"--logging-rotate-backup-count={backup_count}",
+        f"--log-dir={log_dir}",
+        f"--temp-dir={temp_dir}",
+        f"--python-executable={sys.executable}",
+    ]
+    if runtime_env_agent_stdout_filepath:
+        command.append(f"--stdout-filepath={runtime_env_agent_stdout_filepath}")
+    if runtime_env_agent_stderr_filepath:
+        command.append(f"--stderr-filepath={runtime_env_agent_stderr_filepath}")
     return command
 
 

@@ -450,10 +450,15 @@ RAY_DEDUP_LOGS_AGG_WINDOW_S = env_integer("RAY_DEDUP_LOGS_AGG_WINDOW_S", 5)
 # drivers can register and Go workers can be spawned.
 ENABLE_GO_SETUP_WORKER = env_bool("RAY_ENABLE_GO_SETUP_WORKER", False)
 
+ENABLE_GO_LOG_MONITOR = env_bool("RAY_ENABLE_GO_LOG_MONITOR", False)
+
 # Subcommands supported by the Go raygo executable.
 RAYGO_AVAILABLE_COMMAND_SETUP_WORKER = "setup_worker"
 RAYGO_AVAILABLE_COMMAND_DEFAULT_WORKER = "defaultworker"
 RAYGO_AVAILABLE_COMMAND_RUNTIME_ENV_AGENT = "runtime-env-agent"
+
+# Enable launching the Go runtime env agent instead of the Python one.
+ENABLE_GO_RUNTIME_ENV_AGENT = env_bool("RAY_ENABLE_GO_RUNTIME_ENV_AGENT", False)
 
 # Regex for log messages to never deduplicate, or None. This takes precedence over
 # the skip regex below. A default pattern is set for testing.
