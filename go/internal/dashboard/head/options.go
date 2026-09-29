@@ -90,6 +90,13 @@ func ParseListApiOptions(r *http.Request) (*ListApiOptions, error) {
 		if err != nil {
 			return nil, newValueError("invalid limit %q", v)
 		}
+		if n < 0 {
+			// A negative limit would slice with a negative index in filterAndSort
+			// (len(filtered) > opt.Limit is always true for n < 0), panicking
+			// every list API. Python rejects it at islice with a ValueError;
+			// reject it here for the same controlled-error behavior.
+			return nil, newValueError("limit cannot be negative: %d", n)
+		}
 		if n > maxListLimit {
 			return nil, newValueError(
 				"Given limit %d exceeds the supported limit %d. Use a lower limit, or set the `RAY_MAX_LIMIT_FROM_API_SERVER` environment variable to a larger value.",

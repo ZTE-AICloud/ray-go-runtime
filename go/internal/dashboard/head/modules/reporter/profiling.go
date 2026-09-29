@@ -266,6 +266,13 @@ func (r *ReportHead) handleTaskCPUProfile(w http.ResponseWriter, req *http.Reque
 			return
 		}
 	}
+	// The proto field is uint32: Python raises ValueError when assigning a
+	// negative duration, while Go would silently wrap it around to ~136 years
+	// and pin the worker for the whole profiling. Reject negatives explicitly.
+	if durationS < 0 {
+		http.Error(w, fmt.Sprintf("duration cannot be negative: %d.", durationS), http.StatusBadRequest)
+		return
+	}
 	if durationS > maxCPUDurationS {
 		http.Error(w, fmt.Sprintf("The max duration allowed is %d seconds: %d.", maxCPUDurationS, durationS), http.StatusBadRequest)
 		return
@@ -401,6 +408,13 @@ func (r *ReportHead) handleWorkerCPUProfile(w http.ResponseWriter, req *http.Req
 			http.Error(w, "invalid duration", http.StatusBadRequest)
 			return
 		}
+	}
+	// The proto field is uint32: Python raises ValueError when assigning a
+	// negative duration, while Go would silently wrap it around to ~136 years
+	// and pin the worker for the whole profiling. Reject negatives explicitly.
+	if durationS < 0 {
+		http.Error(w, fmt.Sprintf("duration cannot be negative: %d.", durationS), http.StatusBadRequest)
+		return
 	}
 	if durationS > maxCPUDurationS {
 		http.Error(w, fmt.Sprintf("The max duration allowed is %d seconds: %d.", maxCPUDurationS, durationS), http.StatusBadRequest)

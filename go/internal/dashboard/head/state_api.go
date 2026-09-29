@@ -956,9 +956,13 @@ func (m *StateAPIManager) ListObjects(ctx context.Context, opt *ListApiOptions) 
 	if err != nil {
 		return nil, err
 	}
-	var warnings *[]string
+	// Python's callsite_warning is always a list (empty when ref-creation
+	// sites are enabled and no warning fires); keep it non-nil so the JSON
+	// response carries [] instead of null for consumers that treat it as an
+	// array.
+	warnings := &[]string{}
 	if n, _ := strconv.Atoi(os.Getenv("RAY_record_ref_creation_sites")); n == 0 {
-		warnings = &[]string{callsiteWarning}
+		*warnings = []string{callsiteWarning}
 	}
 	// Aligned with the Python flow: num_after_truncation counts the memory
 	// table entries, then filters apply, then sort by object_id and truncate.

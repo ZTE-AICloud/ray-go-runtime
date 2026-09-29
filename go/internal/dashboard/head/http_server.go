@@ -201,7 +201,11 @@ func NewHTTPServer(cfg *HeadConfig, mods []HeadModule, metrics *MetricsRegistry)
 // cancelled.
 func (s *HTTPServer) Run(ctx context.Context) error {
 	ln, err := net.Listen("tcp", s.server.Addr)
-	for i := 0; err != nil && i <= s.cfg.HTTPPortRetries; i++ {
+	// The initial net.Listen above is attempt #1; the loop performs the
+	// remaining HTTPPortRetries attempts, for 1+retries total — matching
+	// Python's for i in range(1 + retries). With retries=0 a taken port is a
+	// hard failure, as the Python head does.
+	for i := 0; err != nil && i < s.cfg.HTTPPortRetries; i++ {
 		s.cfg.HTTPPort++
 		s.server.Addr = fmt.Sprintf("%s:%d", s.cfg.HTTPHost, s.cfg.HTTPPort)
 		ln, err = net.Listen("tcp", s.server.Addr)

@@ -89,6 +89,16 @@ func TestParseListApiOptionsLimitOverMax(t *testing.T) {
 	}
 }
 
+// A negative limit must be rejected at parse time: filterAndSort slices with
+// filtered[:opt.Limit], and len(filtered) > opt.Limit is always true for a
+// negative limit, so letting it through would panic every list API.
+func TestParseListApiOptionsNegativeLimit(t *testing.T) {
+	req := httptest.NewRequest("GET", "/api/v0/actors?limit=-1", nil)
+	if _, err := ParseListApiOptions(req); err == nil {
+		t.Fatal("expected error for negative limit")
+	}
+}
+
 func TestFilterAndTruncate(t *testing.T) {
 	entries := []map[string]interface{}{
 		{"actor_id": "bbb", "state": "ALIVE"},
