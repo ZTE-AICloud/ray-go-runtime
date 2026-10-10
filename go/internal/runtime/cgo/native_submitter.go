@@ -462,3 +462,19 @@ func convertCObjectIdArrayToGo(cArray *C.CObjectIdArray) ([]ids.ObjectID, error)
 
 	return result, nil
 }
+
+// cError converts a C string (allocated by the C++ boundary, caller-freed with
+// free()) into a Go error, freeing the C string. It is only invoked on failure
+// paths, so a nil or empty C string still yields a non-nil error rather than
+// silently turning a failed cgo call into success.
+func cError(cStr *C.char) error {
+	if cStr == nil {
+		return fmt.Errorf("cgo call failed")
+	}
+	msg := C.GoString(cStr)
+	C.free(unsafe.Pointer(cStr))
+	if msg == "" {
+		return fmt.Errorf("cgo call failed")
+	}
+	return fmt.Errorf("%s", msg)
+}

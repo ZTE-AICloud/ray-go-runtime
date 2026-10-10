@@ -140,6 +140,13 @@ func (nr *NativeRuntime) Start() error {
 
 	nr.handle = handle
 
+	// Install the cgo metric backend as the default backend. This must happen
+	// after cgoboundary.Initialize() so the C++ core worker (and its stats
+	// module) is ready; metric registration/recording before this point would
+	// fail with "metric backend not registered". Local mode never reaches this
+	// path and therefore intentionally keeps the backend unregistered.
+	cgointerfaces.RegisterDefaultBackend()
+
 	// Register the serializer's buffer pool with the object package.
 	// This is done explicitly in Start() rather than in init() to:
 	// 1. Follow dependency inversion principle (composition root pattern)

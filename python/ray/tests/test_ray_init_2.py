@@ -548,5 +548,52 @@ def test_can_create_task_in_multiple_sessions(shutdown_only):
     assert ray.get(run_task_in_task.remote()) == "the task"
 
 
+def test_build_go_worker_command_metrics_agent_port():
+    """Verify build_go_worker_command forwards the metrics agent port to the Go
+    worker via --metrics-agent-port, mirroring the C++ worker fix (commit
+    eecfde07c1). Without this, the Go worker's metrics_agent_port stays at -1
+    and ray reports "Failed to establish connection to the metrics exporter
+    agent" (core_worker_process.cc:845).
+    """
+    retry_dir = tempfile.mkdtemp()
+    try:
+        with unittest.mock.patch(
+            "ray._private.services.ray_constants.ENABLE_GO_SETUP_WORKER", False
+        ):
+            command = ray._private.services.build_go_worker_command(
+                gcs_address="127.0.0.1:6379",
+                plasma_store_name="/tmp/store",
+                raylet_name="/tmp/raylet",
+                redis_username="",
+                redis_password="",
+                session_dir=retry_dir,
+                node_ip_address="127.0.0.1",
+                cluster_id="01000000",
+                log_dir=retry_dir,
+                metrics_agent_port=43215,
+            )
+        assert "--metrics-agent-port=43215" in command, command
+
+        # Unset port must not add the flag (default -1 keeps the Go worker on
+        # the disabled path, matching the C++ fix's `is not None` guard).
+        with unittest.mock.patch(
+            "ray._private.services.ray_constants.ENABLE_GO_SETUP_WORKER", False
+        ):
+            command = ray._private.services.build_go_worker_command(
+                gcs_address="127.0.0.1:6379",
+                plasma_store_name="/tmp/store",
+                raylet_name="/tmp/raylet",
+                redis_username="",
+                redis_password="",
+                session_dir=retry_dir,
+                node_ip_address="127.0.0.1",
+                cluster_id="01000000",
+                log_dir=retry_dir,
+            )
+        assert "--metrics-agent-port=" not in command, command
+    finally:
+        shutil.rmtree(retry_dir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main(["-sv", __file__]))
