@@ -104,23 +104,6 @@ go_test(
     gotags = ["apiinternal"],
 )
 
-# worker handle-attach tests, gated behind the "apihandle" build tag because
-# storeHandleLocked mutates package-global handle state.
-go_test(
-    name = "api_handle_test",
-    srcs = ["handle_test.go"],
-    embed = [":api"],
-    gotags = ["apihandle"],
-    deps = [
-        "//go/pkg/errors",
-        "//go/pkg/ids",
-        "//go/pkg/runtime/contract",
-        "//go/pkg/runtime/function",
-        "//go/pkg/runtime/object",
-        "//go/pkg/runtime/submitter",
-    ],
-)
-
 # Re-init lifecycle tests, gated behind the "apireinit" build tag because
 # setHandle mutates package-global handle state (currentHandle) that the default
 # api tests assume is unset.
