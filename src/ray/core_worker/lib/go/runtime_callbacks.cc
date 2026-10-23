@@ -216,6 +216,7 @@ CreateTaskExecutionCallback() {
     // build the function descriptor without guessing the language from the descriptor
     // contents. This matches how Java's nativeRunTaskExecutor and C++'s
     // runtime_callbacks carry the language across the language boundary.
+    int go_error_code = GO_TASK_OK;
     CSerializedObjectArray *c_results =
         GoExecuteTask(static_cast<int>(ray_function.GetLanguage()),
                       static_cast<int>(task_type),
@@ -225,7 +226,24 @@ CreateTaskExecutionCallback() {
                       static_cast<int>(c_args.size()),
                       static_cast<int>(returns->size()),
                       const_cast<char *>(actor_id_data),
-                      actor_id_size);
+                      actor_id_size,
+                      &go_error_code);
+
+    // Map a non-zero error code returned by Go to the corresponding ray::Status
+    // so CoreWorker::ExecuteTask drives the correct exit path (e.g. an actor
+    // that intentionally exits must not be treated as an application error).
+    // Unknown error codes are rejected explicitly instead of silently falling
+    // through to the success path.
+    switch (go_error_code) {
+    case GO_TASK_OK:
+      break;
+    case GO_TASK_ERROR_INTENTIONAL_SYSTEM_EXIT:
+      return ray::Status::IntentionalSystemExit(
+          "Go worker requested intentional system exit");
+    default:
+      return ray::Status::Invalid("Go worker returned unknown task error code: " +
+                                  std::to_string(go_error_code));
+    }
 
     // Log c_results from GoExecuteTask
     RAY_LOG(INFO) << "C++ received c_results from GoExecuteTask: "

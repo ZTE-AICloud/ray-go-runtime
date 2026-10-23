@@ -69,6 +69,19 @@ typedef struct CSerializedObjectArray {
 } CSerializedObjectArray;
 
 /**
+ * GoTaskErrorCode is the task execution status code returned through
+ * error_code out parameter. 0 means the task completed (results in the returned
+ * array). A non-zero value maps to a ray::Status in the C++ callback, mirroring
+ * how the Java worker throws an exception object that the JNI boundary converts
+ * into a Status.
+ */
+typedef enum {
+  GO_TASK_OK = 0,
+  GO_TASK_ERROR_INTENTIONAL_SYSTEM_EXIT =
+      1,  // maps to ray::Status::IntentionalSystemExit
+} GoTaskErrorCode;
+
+/**
  * @brief CObjectIdArray represents an array of object IDs.
  * Caller is responsible for freeing the entire structure and its contents.
  *
