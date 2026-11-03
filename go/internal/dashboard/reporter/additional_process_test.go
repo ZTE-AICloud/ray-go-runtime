@@ -72,7 +72,7 @@ func TestArgvIsScriptWithFlag(t *testing.T) {
 }
 
 // TestArgvIsScriptWithFlagIgnoresEmbeddedSubCommand is the core regression for
-// P1-8: the raylet embeds its children's command lines as quoted values inside
+// The raylet embeds its children's command lines as quoted values inside
 // single argv elements, so a joined-cmdline substring match would classify the
 // raylet itself as log_monitor / runtime_env_agent and fold the raylet's pid and
 // memory into those components. Whole-token matching must reject such an argv.
@@ -297,7 +297,7 @@ func componentNumFDs(records []gaugeRecord, component, pid string) float64 {
 
 // TestAdditionalDiscoversRuntimeEnvAgent verifies the production /proc scan
 // discovers a live runtime_env_agent process and reports the process stats the
-// payload and the gauges need. Before the P1-8 fix this map was always empty.
+// payload and the gauges need. Before the fix this map was always empty.
 func TestAdditionalDiscoversRuntimeEnvAgent(t *testing.T) {
 	pid, cleanup := startScriptChild(t, "runtime_env/agent/main.py", "--runtime-env-agent-port=1234")
 	defer cleanup()
@@ -393,7 +393,8 @@ func TestAdditionalOmitsComponentsWithoutProcesses(t *testing.T) {
 	}
 }
 
-// TestCollectFeedsAdditionalToRecords is the end-to-end proof for P1-8: the
+// TestCollectFeedsAdditionalToRecords is the end-to-end proof that the
+// additional process metrics reach the record layer: the
 // collected auxiliary processes reach the record generator, which emits the
 // component gauges tagged with the component name and its pid. Before the fix no
 // such series existed for log_monitor / runtime_env_agent.

@@ -178,7 +178,7 @@ func TestParseMIGTable(t *testing.T) {
 
 // TestParseMIGTableUnavailableUtilization pins that an instance whose Vol/Sm
 // column reads N/A keeps the unavailable sentinel instead of claiming 0%, which
-// is the same distinction P2-25 established for whole GPUs.
+// is the same distinction already established for whole GPUs.
 func TestParseMIGTableUnavailableUtilization(t *testing.T) {
 	row := "|    0    1    0    0  |   512MiB / 20224MiB |    N/A      0 |   3   0   2   0   0 |\n"
 

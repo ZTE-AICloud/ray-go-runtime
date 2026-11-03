@@ -38,7 +38,7 @@ func TestFormatFailedCommandWithoutPermissionHint(t *testing.T) {
 	}
 }
 
-// TestFormatFailedCommandPermissionHintLinux pins the P2-29 fix: a stderr that
+// TestFormatFailedCommandPermissionHintLinux pins the permission-hint fix: a stderr that
 // mentions permission gains the full guidance block with the linux chown form.
 // The expected string is the exact output of Python's
 // _format_failed_profiler_command for the same inputs.

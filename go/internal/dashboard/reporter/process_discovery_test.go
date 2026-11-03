@@ -207,7 +207,7 @@ func TestRayletAccessorReturnsNilWithoutRaylet(t *testing.T) {
 }
 
 // TestRayletIgnoresUnrelatedProcessWithRayletInArgv is the direct regression for
-// P2-23's wrong-process selection. Every worker and the dashboard agent itself
+// the wrong-process selection. Every worker and the dashboard agent itself
 // carry --raylet-name=<socket> in their argv (services.py), so the previous
 // cmdline-substring scan could report any of them as the raylet. The ancestor
 // walk must ignore such a process because its comm is unrelated.
@@ -268,13 +268,13 @@ func TestRayletIgnoresUnrelatedProcessWithRayletInArgv(t *testing.T) {
 	stubZombies(t)
 
 	if got := findRayletByParentChain(); got != 0 {
-		t.Errorf("findRayletByParentChain() = %d, want 0; a process merely mentioning raylet in its argv must not be selected (P2-23)", got)
+		t.Errorf("findRayletByParentChain() = %d, want 0; a process merely mentioning raylet in its argv must not be selected", got)
 	}
 }
 
 // TestRayletRediscoveredEachCycle verifies the raylet is resolved afresh on every
 // call, so a raylet restart is observed without any cache invalidation. This
-// replaces the P1-9 coverage that the removed procCache used to need.
+// replaces the coverage the removed process cache used to need.
 func TestRayletRediscoveredEachCycle(t *testing.T) {
 	self := os.Getpid()
 	const (

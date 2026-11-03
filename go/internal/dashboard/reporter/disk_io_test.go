@@ -48,7 +48,7 @@ func diskstatsLine(name string, reads, sectorsRead, writes, sectorsWrite int64) 
 	)
 }
 
-// TestDiskIOSkipsPartitions pins the P2-30 fix: aggregate disk IO must count
+// TestDiskIOSkipsPartitions pins the disk-IO aggregation fix: aggregate disk IO must count
 // whole devices only.
 //
 // Python calls psutil.disk_io_counters() with perdisk=False, which drops any

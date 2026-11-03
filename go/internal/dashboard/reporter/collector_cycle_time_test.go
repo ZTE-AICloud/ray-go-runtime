@@ -117,7 +117,7 @@ func TestPosixTimeKeepsFractionalSeconds(t *testing.T) {
 }
 
 // TestCollectorNowKeepsFractionalSeconds verifies the published "now" field is
-// not truncated to a whole second. This is the P2-17 defect: time.Now().Unix()
+// not truncated to a whole second. This is the sub-second timestamp defect: time.Now().Unix()
 // quantized the timestamp, so speed deltas computed from two cycles in the same
 // second became zero.
 func TestCollectorNowKeepsFractionalSeconds(t *testing.T) {

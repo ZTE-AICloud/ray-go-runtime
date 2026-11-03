@@ -86,7 +86,7 @@ func TestPreviousRoundingFormulasWereWrong(t *testing.T) {
 	}
 }
 
-// TestRound2MatchesPythonRoundLoadAvg covers the P2-24 call site: Python divides
+// TestRound2MatchesPythonRoundLoadAvg covers the load-average call site: Python divides
 // the load average by the CPU count and rounds to two places. The expected
 // values are the literals Python's round() returned for each quotient.
 func TestRound2MatchesPythonRoundLoadAvg(t *testing.T) {
@@ -148,7 +148,7 @@ func TestMemPercentMatchesPython(t *testing.T) {
 	}
 }
 
-// TestDiskPercentTieCasesWhereScalingLosesTheTie covers the P2-21 residue: for
+// TestDiskPercentTieCasesWhereScalingLosesTheTie covers the remaining rounding edge: for
 // these used/free pairs the exact percentage is a .x5 tie, but multiplying by
 // 10 first lands one ulp away from it, so rounding the scaled value picked the
 // wrong neighbour. Python rounds the already-scaled percentage.

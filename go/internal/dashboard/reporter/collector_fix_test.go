@@ -152,7 +152,7 @@ func TestNetworkSpeedInsufficientSamples(t *testing.T) {
 }
 
 // TestMeminfoCachedPerCycle verifies that meminfo is parsed once per collect
-// cycle and cached, and that resetCycleCache invalidates it for the next cycle.
+// cycle and cached, and that beginCycle invalidates it for the next cycle.
 func TestMeminfoCachedPerCycle(t *testing.T) {
 	s := &systemSource{}
 	if s.meminfoCached {

@@ -380,7 +380,7 @@ func TestCollectorWorkersEmptyWhenNodeManagerPortUnset(t *testing.T) {
 // in one cycle: the raylet reply becomes worker process info, the publish-time
 // step adds the GPU fields the Python ProcessInfo model requires, the worker
 // feeds the per-component gauges, and the published payload carries the process
-// list the node detail API reads. This is the end-to-end shape of the P0-3 fix:
+// list the node detail API reads. This is the end-to-end shape of the workers fix:
 // workers is no longer permanently empty.
 func TestPublishOnceCarriesDiscoveredWorkers(t *testing.T) {
 	self := os.Getpid()

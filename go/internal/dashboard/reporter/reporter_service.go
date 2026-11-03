@@ -12,10 +12,12 @@ import (
 )
 
 // effectiveMemoryProfileDuration clamps a client-supplied profile duration.
-// The proto field is uint32 and client-controlled, so zero and negative values
-// fall back to the default (a negative value would drive the wait timer with
-// a negative interval and fire immediately), and anything above the maximum
-// is capped.
+// The proto field is optional and client-controlled, so an absent or zero value
+// falls back to the default and anything above the maximum is capped. A
+// negative value is rejected by the proto's own unsigned type today; the guard
+// is kept because the helper is the one choke point every caller goes through,
+// and a negative duration would drive the wait timer with a negative interval
+// and fire immediately.
 func effectiveMemoryProfileDuration(seconds int64) int64 {
 	if seconds <= 0 {
 		return memoryProfileDefaultDurationSeconds

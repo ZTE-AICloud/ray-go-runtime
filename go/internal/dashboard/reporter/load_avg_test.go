@@ -38,7 +38,7 @@ func loadAvgOf(t *testing.T, stats map[string]interface{}) []interface{} {
 	return pair
 }
 
-// TestLoadAvgPerCPUIsNullWithoutCPUCount pins the P2-22 shape: when the logical
+// TestLoadAvgPerCPUIsNullWithoutCPUCount pins the required shape: when the logical
 // CPU count is 0, Python _get_load_avg sets per_cpu_load = None and json.dumps
 // renders it as null. A Go empty slice serializes as [] instead, so the second
 // element must be untyped nil to reach the wire as null.
@@ -62,7 +62,7 @@ func TestLoadAvgPerCPUIsNullWithoutCPUCount(t *testing.T) {
 }
 
 // TestLoadAvgPerCPUEncodesAsJSONNull verifies the nil above reaches the wire as
-// null rather than [] — the actual P2-22 defect, which only shows up after
+// null rather than [] — the actual defect, which only shows up after
 // serialization.
 func TestLoadAvgPerCPUEncodesAsJSONNull(t *testing.T) {
 	s := &systemSource{
@@ -84,7 +84,7 @@ func TestLoadAvgPerCPUEncodesAsJSONNull(t *testing.T) {
 		t.Errorf("loadAvg JSON = %s, want the per-CPU element to be null, not []", got)
 	}
 	if strings.Contains(got, ",[]]") {
-		t.Errorf("loadAvg JSON = %s, want null rather than an empty array (P2-22)", got)
+		t.Errorf("loadAvg JSON = %s, want null rather than an empty array", got)
 	}
 }
 

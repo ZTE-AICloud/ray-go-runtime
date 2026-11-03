@@ -222,7 +222,7 @@ func TestParseGPUProcessCsvDegradesOnMalformedInput(t *testing.T) {
 	}
 }
 
-// TestGPUCollectorAttachesProcessesByUUID is the core of P1-11: the device
+// TestGPUCollectorAttachesProcessesByUUID is the core of the GPU-processes fix: the device
 // records must carry their processes so the worker and actor GPU fields derived
 // from them stop being constantly zero.
 func TestGPUCollectorAttachesProcessesByUUID(t *testing.T) {

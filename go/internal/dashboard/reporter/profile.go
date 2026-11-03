@@ -345,7 +345,6 @@ func (m *ProfileManager) TraceDump(pid int, native, subprocesses bool) (bool, st
 		args = append(args, "--subprocesses")
 	}
 	res, command := runProfiler(pyspy, args...)
-
 	if res.ExitCode != 0 {
 		return false, formatFailedCommand(command, "py-spy", res)
 	}
@@ -399,7 +398,6 @@ func (m *ProfileManager) CPUProfile(pid int, format string, duration int, native
 		args = append(args, "--subprocesses")
 	}
 	res, command := runProfiler(pyspy, args...)
-
 	if res.ExitCode != 0 {
 		return false, formatFailedCommand(command, "py-spy", res)
 	}
