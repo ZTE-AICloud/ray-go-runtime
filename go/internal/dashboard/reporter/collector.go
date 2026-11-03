@@ -1461,7 +1461,18 @@ type processCPUTimes struct {
 // line cannot be read or is too short.
 func readProcessCPUTimes(pid int) (processCPUTimes, bool) {
 	fields, err := procStatFields(pid)
-	if err != nil || len(fields) < 15 {
+	if err != nil {
+		return processCPUTimes{}, false
+	}
+	return cpuTimesFromStatFields(fields)
+}
+
+// cpuTimesFromStatFields maps the utime/stime/cutime/cstime fields of one
+// /proc/<pid>/stat snapshot to seconds. It is the seam that makes the field
+// offsets testable: a test that read a live process twice would race the tick
+// counter and could compare two different snapshots.
+func cpuTimesFromStatFields(fields []string) (processCPUTimes, bool) {
+	if len(fields) < 15 {
 		return processCPUTimes{}, false
 	}
 	return processCPUTimes{

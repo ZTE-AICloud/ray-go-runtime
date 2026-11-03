@@ -525,14 +525,16 @@ func TestProcStatFieldsTrimsPIDNameWithSpaces(t *testing.T) {
 // i.e. indices 11-14 after the state field, and every reported value is exactly
 // its raw tick count divided by USER_HZ.
 func TestReadProcessCPUTimesFieldIndices(t *testing.T) {
-	pid := os.Getpid()
-	times, ok := readProcessCPUTimes(pid)
-	if !ok {
-		t.Skip("cannot read own CPU times")
-	}
-	fields, err := procStatFields(pid)
+	// One snapshot only: reading the live process twice would race the tick
+	// counter, and a tick landing between the reads would make the comparison
+	// fail for reasons that have nothing to do with the field offsets.
+	fields, err := procStatFields(os.Getpid())
 	if err != nil {
-		t.Fatalf("procStatFields: %v", err)
+		t.Skipf("cannot read own stat: %v", err)
+	}
+	times, ok := cpuTimesFromStatFields(fields)
+	if !ok {
+		t.Skip("stat line too short")
 	}
 	want := []struct {
 		name string
