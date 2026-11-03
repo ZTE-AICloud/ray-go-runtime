@@ -3,6 +3,7 @@ package reporter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -166,6 +167,15 @@ func (m *ReporterModule) fetchClusterStats(ctx context.Context) map[string]inter
 		return nil
 	}
 	raw, err := m.cfg.GCS.Get(ctx, "", debugAutoscalingStatus)
+	if errors.Is(err, gcs.ErrKeyNotFound) {
+		// Only autoscaler v1 publishes DEBUG_AUTOSCALING_STATUS, and a cluster
+		// without an autoscaler publishes nothing at all, so a missing key is
+		// the ordinary case rather than a failure: the cluster gauges are
+		// skipped and the cycle continues. The Python agent reads the same key
+		// with a None default, for the same reason.
+		log.Log.V(1).Info("no autoscaler status published; cluster metrics are skipped")
+		return nil
+	}
 	if err != nil {
 		log.Log.Error(err, "failed to get autoscaling status for cluster metrics")
 		return nil

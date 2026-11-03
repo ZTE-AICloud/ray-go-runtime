@@ -13,9 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/ray-project/ray/go/internal/dashboard/agent"
 	"github.com/ray-project/ray/go/pkg/gcs"
 	"github.com/ray-project/ray/go/pkg/ids"
+	"github.com/ray-project/ray/go/pkg/log"
 	"google.golang.org/grpc"
 )
 
@@ -776,5 +778,89 @@ func TestReporterModuleRecordsStateIsIncremental(t *testing.T) {
 	// diff. A nil map would mean the state was never initialised.
 	if m.records.latestWorkerProcNames == nil && m.records.latestGPUWorkerProcNames == nil {
 		t.Error("records state was not carried on the module")
+	}
+}
+
+// recordingSink captures the entries a logger would emit, so a test can assert
+// on severity rather than on message text.
+type recordingSink struct {
+	entries []recordedEntry
+}
+
+type recordedEntry struct {
+	err   error
+	msg   string
+	level int
+}
+
+func (s *recordingSink) Init(logr.RuntimeInfo) {}
+
+func (s *recordingSink) Enabled(level int) bool { return true }
+
+func (s *recordingSink) Info(level int, msg string, _ ...interface{}) {
+	s.entries = append(s.entries, recordedEntry{msg: msg, level: level})
+}
+
+func (s *recordingSink) Error(err error, msg string, _ ...interface{}) {
+	s.entries = append(s.entries, recordedEntry{err: err, msg: msg, level: 0})
+}
+
+func (s *recordingSink) WithValues(_ ...interface{}) logr.LogSink { return s }
+
+func (s *recordingSink) WithName(_ string) logr.LogSink { return s }
+
+// TestReporterModuleFetchClusterStatsMissingKeyIsNotAnError verifies a missing
+// autoscaler status is treated as an absent value rather than a failure. Only
+// autoscaler v1 publishes DEBUG_AUTOSCALING_STATUS, so on every v2 cluster and
+// on any cluster without an autoscaler the key is simply missing; logging that
+// at error severity would emit one line per collection cycle for the lifetime
+// of the agent.
+func TestReporterModuleFetchClusterStatsMissingKeyIsNotAnError(t *testing.T) {
+	orig := log.Log
+	defer func() { log.Log = orig }()
+	sink := &recordingSink{}
+	log.Log = logr.New(sink)
+
+	client := &fakeGCSClient{err: gcs.ErrKeyNotFound}
+	cfg := agent.Config{LogDir: t.TempDir(), NodeIP: "127.0.0.1", IsHead: true, GCS: client}
+	m, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := m.fetchClusterStats(context.Background()); got != nil {
+		t.Errorf("fetchClusterStats = %v, want nil", got)
+	}
+	for _, e := range sink.entries {
+		if e.err != nil {
+			t.Errorf("missing autoscaler status logged as an error: %v (%s)", e.err, e.msg)
+		}
+	}
+}
+
+// TestReporterModuleFetchClusterStatsReadErrorIsReported keeps the real
+// failures loud: a read error other than a missing key must still surface.
+func TestReporterModuleFetchClusterStatsReadErrorIsReported(t *testing.T) {
+	orig := log.Log
+	defer func() { log.Log = orig }()
+	sink := &recordingSink{}
+	log.Log = logr.New(sink)
+
+	client := &fakeGCSClient{err: errors.New("kv unavailable")}
+	cfg := agent.Config{LogDir: t.TempDir(), NodeIP: "127.0.0.1", IsHead: true, GCS: client}
+	m, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := m.fetchClusterStats(context.Background()); got != nil {
+		t.Errorf("fetchClusterStats = %v, want nil", got)
+	}
+	var reported bool
+	for _, e := range sink.entries {
+		if e.err != nil {
+			reported = true
+		}
+	}
+	if !reported {
+		t.Error("a genuine read error must still be logged as an error")
 	}
 }
