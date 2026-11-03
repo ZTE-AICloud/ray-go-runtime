@@ -202,11 +202,12 @@ def test_go_dashboard_agent_runs_and_persists_ports(monkeypatch):
 
     The agent owns the port-discovery file protocol of
     go/internal/dashboard/agent/port_persistence.go: three
-    `{port_name}_{node_id_hex}` files in the session directory. A cluster
-    started without an explicit export port passes none to the agent, so
-    metrics_export_port carries the -1 "not in use" sentinel; a cluster that
-    configures one (KubeRay's `metrics-export-port` rayStartParam) publishes it
-    instead, which the port-persistence unit test covers directly.
+    `{port_name}_{node_id_hex}` files in the session directory. The export
+    entry only carries a port when the cluster configured one (KubeRay's
+    `metrics-export-port` rayStartParam): a cluster started without it passes
+    none to the agent, which then publishes the -1 "not in use" sentinel.
+    Whichever the launcher passed must reach the agent and, when positive,
+    match the persisted file, so the wiring cannot regress unnoticed.
     """
     monkeypatch.setattr(ray_constants, "ENABLE_GO_DASHBOARD_AGENT", True)
     ctx = ray.init(address="local", num_cpus=1)
@@ -226,7 +227,12 @@ def test_go_dashboard_agent_runs_and_persists_ports(monkeypatch):
                 "dashboard_agent_listen_port",
             )
         }
-        assert ports["metrics_export_port"] == -1
+        configured = _cmdline_flag_value(proc.cmdline(), "--metrics-export-port")
+        assert configured is not None, proc.cmdline()
+        if int(configured) > 0:
+            assert ports["metrics_export_port"] == int(configured)
+        else:
+            assert ports["metrics_export_port"] == -1
         assert ports["metrics_agent_port"] > 0
         assert ports["dashboard_agent_listen_port"] > 0
     finally:
