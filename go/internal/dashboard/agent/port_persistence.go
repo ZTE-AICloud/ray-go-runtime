@@ -35,8 +35,9 @@ const (
 // persistAgentPorts writes the port-discovery files raylet waits for before it
 // registers this node in GCS. metricsAgentPort and listenPort are the actual
 // bound ports, which differ from the configured 0 when dynamically allocated.
-// The Go agent does not export metrics, so metrics_export_port is written as -1
-// ("service not in use", mirroring the Python agent's minimal branch).
+// metrics_export_port carries the Prometheus export port the reporter's exporter
+// serves on, or -1 ("service not in use", mirroring the Python agent's minimal
+// branch) when the agent was launched without one.
 //
 // An empty SessionDir means there is nowhere to publish (tests that exercise
 // Run without a real session directory); persistence is skipped in that case.
@@ -44,12 +45,16 @@ func persistAgentPorts(cfg Config, metricsAgentPort, listenPort int) error {
 	if cfg.SessionDir == "" {
 		return nil
 	}
+	metricsExportPort := -1
+	if cfg.MetricsExportPort > 0 && !cfg.MetricsCollectionDisabled {
+		metricsExportPort = cfg.MetricsExportPort
+	}
 	ports := []struct {
 		name string
 		port int
 	}{
 		{metricsAgentPortName, metricsAgentPort},
-		{metricsExportPortName, -1},
+		{metricsExportPortName, metricsExportPort},
 		{dashboardAgentListenPortName, listenPort},
 	}
 	for _, p := range ports {

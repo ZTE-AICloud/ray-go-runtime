@@ -307,7 +307,7 @@ func TestRunPersistsDashboardAgentPorts(t *testing.T) {
 		t.Errorf("metrics_agent_port = %d, want a bound ephemeral port", grpcPort)
 	}
 	if got := readPersistedPort(t, dir, nodeID, "metrics_export_port"); got != -1 {
-		t.Errorf("metrics_export_port = %d, want -1 (the Go agent does not export metrics)", got)
+		t.Errorf("metrics_export_port = %d, want -1 (no export port is configured in this test)", got)
 	}
 	listenPort := readPersistedPort(t, dir, nodeID, "dashboard_agent_listen_port")
 	if listenPort <= 0 {
@@ -325,8 +325,8 @@ func TestRunPersistsDashboardAgentPorts(t *testing.T) {
 }
 
 // TestPersistAgentPorts verifies the exact file names and decimal contents for
-// injected bound ports. The Go agent does not export metrics, so
-// metrics_export_port must be -1.
+// injected bound ports. A config without an export port publishes -1 for
+// metrics_export_port, the "service not in use" sentinel.
 func TestPersistAgentPorts(t *testing.T) {
 	dir := t.TempDir()
 	nodeID, err := ids.NodeIDFromHex("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c")
@@ -352,6 +352,29 @@ func TestPersistAgentPorts(t *testing.T) {
 		if got := string(data); got != c.want {
 			t.Errorf("%s content = %q, want %q", c.name, got, c.want)
 		}
+	}
+}
+
+// TestPersistAgentPortsPublishesConfiguredExportPort verifies the export port
+// is published when the agent was launched with one, so head-side consumers
+// scrape the reporter's Prometheus endpoint instead of the -1 sentinel.
+func TestPersistAgentPortsPublishesConfiguredExportPort(t *testing.T) {
+	dir := t.TempDir()
+	nodeID := ids.NewNodeID()
+	cfg := Config{SessionDir: dir, NodeID: nodeID, MetricsExportPort: 44217}
+	if err := persistAgentPorts(cfg, 12345, 54321); err != nil {
+		t.Fatalf("persistAgentPorts: %v", err)
+	}
+	if got := readPersistedPort(t, dir, nodeID, "metrics_export_port"); got != 44217 {
+		t.Errorf("metrics_export_port = %d, want 44217", got)
+	}
+
+	disabled := Config{SessionDir: dir, NodeID: nodeID, MetricsExportPort: 44217, MetricsCollectionDisabled: true}
+	if err := persistAgentPorts(disabled, 12345, 54321); err != nil {
+		t.Fatalf("persistAgentPorts: %v", err)
+	}
+	if got := readPersistedPort(t, dir, nodeID, "metrics_export_port"); got != -1 {
+		t.Errorf("metrics_export_port = %d, want -1 when metrics collection is disabled", got)
 	}
 }
 

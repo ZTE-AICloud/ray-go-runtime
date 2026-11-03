@@ -202,9 +202,10 @@ def test_go_dashboard_agent_runs_and_persists_ports(monkeypatch):
 
     The agent owns the port-discovery file protocol of
     go/internal/dashboard/agent/port_persistence.go: three
-    `{port_name}_{node_id_hex}` files in the session directory, with
-    metrics_export_port persisted as -1 because the Go agent does not export
-    metrics.
+    `{port_name}_{node_id_hex}` files in the session directory. Every port is
+    the one the agent actually serves on: the reporter exports Prometheus
+    metrics on metrics_export_port, so it must not be the -1 "not in use"
+    sentinel.
     """
     monkeypatch.setattr(ray_constants, "ENABLE_GO_DASHBOARD_AGENT", True)
     ctx = ray.init(address="local", num_cpus=1)
@@ -224,7 +225,7 @@ def test_go_dashboard_agent_runs_and_persists_ports(monkeypatch):
                 "dashboard_agent_listen_port",
             )
         }
-        assert ports["metrics_export_port"] == -1
+        assert ports["metrics_export_port"] > 0
         assert ports["metrics_agent_port"] > 0
         assert ports["dashboard_agent_listen_port"] > 0
     finally:
