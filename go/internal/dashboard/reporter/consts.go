@@ -47,6 +47,16 @@ const (
 // default reporting interval, aligned with Python env_integer.
 const reporterUpdateIntervalEnv = "REPORTER_UPDATE_INTERVAL_MS"
 
+// debugAutoscalingStatus is the GCS internal KV key holding the autoscaler debug
+// status, aligned with Python ray_constants.DEBUG_AUTOSCALING_STATUS. The head
+// node reporter reads it to publish the cluster-level gauges.
+const debugAutoscalingStatus = "__autoscaling_status"
+
+// gcsPIDKey is the GCS internal KV key holding the gcs_server pid, aligned with
+// Ray's kGcsPidKey (GCS_PID_KEY in Python). The head node reporter reads it to
+// locate the gcs_server process, mirroring the Python _get_gcs.
+const gcsPIDKey = "gcs_pid"
+
 // UpdateIntervalMs returns the reporting interval in milliseconds. It reads
 // the REPORTER_UPDATE_INTERVAL_MS environment variable and falls back to
 // DefaultReporterUpdateIntervalMs when the variable is unset or invalid.

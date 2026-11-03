@@ -3,7 +3,6 @@ package reporter
 import (
 	"math"
 	"testing"
-	"time"
 )
 
 type fakeSource struct {
@@ -34,7 +33,7 @@ func (f *fakeSource) cpuPercent() (float64, error) {
 	}
 	return f.cpuP, nil
 }
-func (f *fakeSource) resetCycleCache() {}
+func (f *fakeSource) beginCycle(now float64) {}
 func (f *fakeSource) cpuCounts() ([]int, error) {
 	if err := f.errs["cpus"]; err != nil {
 		return nil, err
@@ -205,13 +204,16 @@ func TestCollectorReturnsFullStatsMap(t *testing.T) {
 		}
 	}
 
-	now, ok := stats["now"].(int64)
+	// "now" is a POSIX timestamp in float seconds, mirroring the Python
+	// StatsPayload `now: float` field. It must not be truncated to a whole
+	// second: see TestCollectorNowKeepsFractionalSeconds.
+	now, ok := stats["now"].(float64)
 	if !ok {
-		t.Fatalf("now type = %T, want int64", stats["now"])
+		t.Fatalf("now type = %T, want float64", stats["now"])
 	}
-	cur := time.Now().Unix()
+	cur := posixTime()
 	if now < cur-5 || now > cur+5 {
-		t.Errorf("now = %d, outside reasonable window around %d (want epoch seconds)", now, cur)
+		t.Errorf("now = %v, outside reasonable window around %v (want epoch seconds)", now, cur)
 	}
 }
 
