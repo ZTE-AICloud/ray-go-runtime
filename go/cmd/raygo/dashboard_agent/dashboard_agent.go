@@ -43,21 +43,22 @@ const dashboardAgentLogFilename = "dashboard_agent.log"
 // through cmd.SetArgs.
 var (
 	// Required parameters.
-	nodeIPAddress   string
-	grpcPort        int
-	listenPort      int
-	nodeManagerPort string
-	gcsAddress      string
-	clusterIDHex    string
-	nodeIDHex       string
-	logDir          string
-	tempDir         string
-	sessionDir      string
-	sessionName     string
-	objectStoreName string
-	rayletName      string
-	stdoutFilepath  string
-	stderrFilepath  string
+	nodeIPAddress     string
+	metricsExportPort int
+	grpcPort          int
+	listenPort        int
+	nodeManagerPort   string
+	gcsAddress        string
+	clusterIDHex      string
+	nodeIDHex         string
+	logDir            string
+	tempDir           string
+	sessionDir        string
+	sessionName       string
+	objectStoreName   string
+	rayletName        string
+	stdoutFilepath    string
+	stderrFilepath    string
 
 	// Logging configuration.
 	loggingLevel             string
@@ -112,6 +113,7 @@ func init() {
 
 	// Required parameters.
 	DashboardAgentCmd.Flags().StringVar(&nodeIPAddress, "node-ip-address", "", "the IP address of this node.")
+	DashboardAgentCmd.Flags().IntVar(&metricsExportPort, "metrics-export-port", 0, "The port to expose metrics through Prometheus.")
 	DashboardAgentCmd.Flags().IntVar(&grpcPort, "grpc-port", 0, "The port on which the dashboard agent gRPC server listens.")
 	DashboardAgentCmd.Flags().IntVar(&listenPort, "listen-port", 0, "The port on which the dashboard agent HTTP server listens.")
 	DashboardAgentCmd.Flags().StringVar(&nodeManagerPort, "node-manager-port", "", "The port of the node manager on this node, or the raylet placeholder literal.")
@@ -201,6 +203,7 @@ func buildConfig() (*agent.Config, error) {
 		GRPCPort:                  grpcPort,
 		ListenPort:                listenPort,
 		NodeManagerPort:           nodeManagerPortInt,
+		MetricsExportPort:         metricsExportPort,
 		MetricsCollectionDisabled: disableMetricsCollection,
 	}, nil
 }

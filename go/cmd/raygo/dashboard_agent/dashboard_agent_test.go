@@ -41,6 +41,7 @@ const (
 func testArgs(overrides map[string]string) []string {
 	base := map[string]string{
 		"node-ip-address":            "1.2.3.4",
+		"metrics-export-port":        "44217",
 		"grpc-port":                  "8888",
 		"listen-port":                "8080",
 		"node-manager-port":          "12345",
@@ -83,6 +84,9 @@ func TestBuildConfig(t *testing.T) {
 	}
 	if cfg.GRPCPort != 8888 {
 		t.Errorf("cfg.GRPCPort = %d, want %d", cfg.GRPCPort, 8888)
+	}
+	if cfg.MetricsExportPort != 44217 {
+		t.Errorf("cfg.MetricsExportPort = %d, want %d", cfg.MetricsExportPort, 44217)
 	}
 	if cfg.ListenPort != 8080 {
 		t.Errorf("cfg.ListenPort = %d, want %d", cfg.ListenPort, 8080)
