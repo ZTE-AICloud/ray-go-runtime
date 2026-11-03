@@ -33,21 +33,21 @@ const (
 )
 
 // persistAgentPorts writes the port-discovery files raylet waits for before it
-// registers this node in GCS. metricsAgentPort and listenPort are the actual
-// bound ports, which differ from the configured 0 when dynamically allocated.
-// metrics_export_port carries the Prometheus export port the reporter's exporter
-// serves on, or -1 ("service not in use", mirroring the Python agent's minimal
-// branch) when the agent was launched without one.
+// registers this node in GCS. All three are the ports the agent actually bound,
+// which differ from the configured 0 when dynamically allocated.
+// metrics_export_port carries the port the reporter's Prometheus exporter bound,
+// or -1 ("service not in use", mirroring the Python agent's minimal branch) when
+// the agent was launched without one, metrics collection is disabled, or the
+// bind failed.
 //
 // An empty SessionDir means there is nowhere to publish (tests that exercise
 // Run without a real session directory); persistence is skipped in that case.
-func persistAgentPorts(cfg Config, metricsAgentPort, listenPort int) error {
+func persistAgentPorts(cfg Config, metricsAgentPort, listenPort, metricsExportPort int) error {
 	if cfg.SessionDir == "" {
 		return nil
 	}
-	metricsExportPort := -1
-	if cfg.MetricsExportPort > 0 && !cfg.MetricsCollectionDisabled {
-		metricsExportPort = cfg.MetricsExportPort
+	if cfg.MetricsCollectionDisabled {
+		metricsExportPort = -1
 	}
 	ports := []struct {
 		name string
@@ -63,6 +63,21 @@ func persistAgentPorts(cfg Config, metricsAgentPort, listenPort int) error {
 		}
 	}
 	return nil
+}
+
+// persistMetricsExportPort rewrites the metrics export port file once the module
+// that serves it has bound, so the published value is the port something
+// actually answers on rather than the port the agent was asked for. A
+// non-positive port, or a disabled collection, publishes the not-in-use
+// sentinel.
+func persistMetricsExportPort(cfg Config, port int) error {
+	if cfg.SessionDir == "" {
+		return nil
+	}
+	if cfg.MetricsCollectionDisabled || port <= 0 {
+		port = -1
+	}
+	return persistPort(cfg.SessionDir, cfg.NodeID, metricsExportPortName, port)
 }
 
 // persistPort writes one port file at "{dir}/{port_name}_{node_id_hex}",

@@ -113,7 +113,6 @@ func init() {
 
 	// Required parameters.
 	DashboardAgentCmd.Flags().StringVar(&nodeIPAddress, "node-ip-address", "", "the IP address of this node.")
-	DashboardAgentCmd.Flags().IntVar(&metricsExportPort, "metrics-export-port", 0, "The port to expose metrics through Prometheus.")
 	DashboardAgentCmd.Flags().IntVar(&grpcPort, "grpc-port", 0, "The port on which the dashboard agent gRPC server listens.")
 	DashboardAgentCmd.Flags().IntVar(&listenPort, "listen-port", 0, "The port on which the dashboard agent HTTP server listens.")
 	DashboardAgentCmd.Flags().StringVar(&nodeManagerPort, "node-manager-port", "", "The port of the node manager on this node, or the raylet placeholder literal.")
@@ -137,6 +136,10 @@ func init() {
 	DashboardAgentCmd.Flags().IntVar(&loggingRotateBackupCount, "logging-rotate-backup-count", 0, "Specify the backup count of rotated log file")
 
 	// Optional behavior flags.
+	// The export port is optional so a launcher that does not pass it still
+	// starts the agent with metrics disabled; a required flag would abort the
+	// launch instead.
+	DashboardAgentCmd.Flags().IntVar(&metricsExportPort, "metrics-export-port", 0, "The port to expose metrics through Prometheus.")
 	DashboardAgentCmd.Flags().BoolVar(&disableMetricsCollection, "disable-metrics-collection", false, "Disable metrics collection for this agent.")
 	DashboardAgentCmd.Flags().StringVar(&isHeadFlag, "is-head", "", "Whether this node is the head node (\"true\" or \"false\"). When set, it is used directly and GCS is not consulted.")
 

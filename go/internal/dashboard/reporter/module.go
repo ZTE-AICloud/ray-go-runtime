@@ -322,6 +322,17 @@ func (m *ReporterModule) Start(ctx context.Context) error {
 	return nil
 }
 
+// BoundMetricsExportPort reports the port the Prometheus exporter actually
+// listens on, or -1 when it is disabled or its bind failed. The agent publishes
+// this value in the port-discovery file instead of the configured port, so a
+// node never advertises a metrics endpoint nothing answers on.
+func (m *ReporterModule) BoundMetricsExportPort() int {
+	if m.exporter == nil {
+		return -1
+	}
+	return m.exporter.BoundPort()
+}
+
 // Close stops the periodic collection loop and the Prometheus exporter. It is
 // idempotent and safe to call when the module was never started (cancel is nil)
 // or has already been closed.

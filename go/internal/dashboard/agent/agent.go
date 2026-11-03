@@ -71,6 +71,13 @@ type Module interface {
 	RegisterGRPC(s *grpc.Server) error
 }
 
+// metricsExporter is implemented by a module that serves a Prometheus endpoint,
+// so the agent can publish the port that endpoint actually bound instead of the
+// port it was asked for.
+type metricsExporter interface {
+	BoundMetricsExportPort() int
+}
+
 // Run owns the HTTP/gRPC server lifecycle: it builds both servers from the
 // registered modules, starts every module, publishes the agent address in GCS
 // InternalKV, then serves HTTP and gRPC until ctx is cancelled. An HTTP bind
@@ -86,7 +93,7 @@ func Run(ctx context.Context, cfg Config, mods []Module) error {
 		// Python keeps the agent alive with the HTTP service disabled in this
 		// case and does not publish its address, because every head-side
 		// consumer reaches the agent through that registration.
-		log.Log.Error(httpErr, "failed to start HTTP server; " +
+		log.Log.Error(httpErr, "failed to start HTTP server; "+
 			"the agent will stay alive but the HTTP service will be disabled")
 		httpSrv = nil
 	}
@@ -99,15 +106,19 @@ func Run(ctx context.Context, cfg Config, mods []Module) error {
 		return fmt.Errorf("create gRPC server: %w", err)
 	}
 
-	// Publish the bound ports before registering the agent: when a port is 0,
-	// raylet waits for these files before it registers this node in GCS, so
-	// writing them after registration would deadlock the startup.
 	grpcPort := listenerPort(grpcSrv.listener)
 	listenPort := -1
 	if httpSrv != nil {
 		listenPort = listenerPort(httpSrv.listener)
 	}
-	if err := persistAgentPorts(cfg, grpcPort, listenPort); err != nil {
+
+	// Publish the bound ports before registering the agent: when a port is 0,
+	// raylet waits for these files before it registers this node in GCS, so
+	// writing them after registration would deadlock the startup. They are
+	// written before the modules start so a module that fails cannot leave
+	// raylet waiting; the metrics export port is republished below, once the
+	// module that serves it has bound.
+	if err := persistAgentPorts(cfg, grpcPort, listenPort, -1); err != nil {
 		shutdownServers(httpSrv, grpcSrv)
 		return fmt.Errorf("persist dashboard agent ports: %w", err)
 	}
@@ -119,6 +130,20 @@ func Run(ctx context.Context, cfg Config, mods []Module) error {
 			shutdownServers(httpSrv, grpcSrv)
 			return fmt.Errorf("start module: %w", err)
 		}
+	}
+
+	// Republish the export port now that it is known. A module whose bind
+	// failed reports -1, so the file never advertises an endpoint nothing
+	// answers on.
+	exportPort := -1
+	for _, m := range mods {
+		if e, ok := m.(metricsExporter); ok {
+			exportPort = e.BoundMetricsExportPort()
+		}
+	}
+	if err := persistMetricsExportPort(cfg, exportPort); err != nil {
+		shutdownServers(httpSrv, grpcSrv)
+		return fmt.Errorf("persist dashboard agent metrics export port: %w", err)
 	}
 
 	if httpSrv != nil {

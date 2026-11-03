@@ -22,6 +22,11 @@ import (
 type StatsExporter struct {
 	registry *prometheus.Registry
 	server   *http.Server
+	// boundPort is the port the server actually listens on once Start has
+	// succeeded, or -1 when the exporter is disabled or its bind failed. The
+	// agent publishes this value instead of the configured one, so a node never
+	// advertises a metrics endpoint nothing answers on.
+	boundPort int
 	// listener is retained so Close can release the port synchronously. Closing
 	// the server alone relies on the Serve goroutine having registered the
 	// listener first, which leaves the port briefly bound when Close races the
@@ -34,7 +39,7 @@ type StatsExporter struct {
 // the agent alive with metrics disabled, matching the Python agent which logs
 // and continues when the exporter cannot start.
 func NewStatsExporter(registry *prometheus.Registry) *StatsExporter {
-	return &StatsExporter{registry: registry}
+	return &StatsExporter{registry: registry, boundPort: -1}
 }
 
 // Start binds the /metrics endpoint on host:port and serves it in the
@@ -71,6 +76,7 @@ func (e *StatsExporter) Start(ctx context.Context, host string, port int) error 
 	}
 	e.server = server
 	e.listener = ln
+	e.boundPort = ln.Addr().(*net.TCPAddr).Port
 
 	go func() {
 		<-ctx.Done()
@@ -83,6 +89,15 @@ func (e *StatsExporter) Start(ctx context.Context, host string, port int) error 
 	}()
 	log.Log.Info("reporter metrics server started", "addr", addr)
 	return nil
+}
+
+// BoundPort reports the port the server listens on, or -1 when it is not
+// serving. It is only meaningful after Start.
+func (e *StatsExporter) BoundPort() int {
+	if e == nil || e.listener == nil {
+		return -1
+	}
+	return e.boundPort
 }
 
 // Close shuts down the metrics server. It is idempotent and safe to call when

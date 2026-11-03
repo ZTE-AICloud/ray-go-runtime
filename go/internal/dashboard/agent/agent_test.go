@@ -333,7 +333,7 @@ func TestPersistAgentPorts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NodeIDFromHex: %v", err)
 	}
-	if err := persistAgentPorts(Config{SessionDir: dir, NodeID: nodeID}, 12345, 54321); err != nil {
+	if err := persistAgentPorts(Config{SessionDir: dir, NodeID: nodeID}, 12345, 54321, -1); err != nil {
 		t.Fatalf("persistAgentPorts: %v", err)
 	}
 	for _, c := range []struct {
@@ -355,26 +355,73 @@ func TestPersistAgentPorts(t *testing.T) {
 	}
 }
 
-// TestPersistAgentPortsPublishesConfiguredExportPort verifies the export port
-// is published when the agent was launched with one, so head-side consumers
-// scrape the reporter's Prometheus endpoint instead of the -1 sentinel.
-func TestPersistAgentPortsPublishesConfiguredExportPort(t *testing.T) {
+// fakeMetricsModule is a module that serves a Prometheus endpoint, so the agent
+// can be shown publishing the port the module bound rather than a configured
+// one.
+type fakeMetricsModule struct {
+	startErr error
+	bound    int
+}
+
+func (f *fakeMetricsModule) Start(context.Context) error       { return f.startErr }
+func (f *fakeMetricsModule) RegisterHTTP(*http.ServeMux) error { return nil }
+func (f *fakeMetricsModule) RegisterGRPC(*grpc.Server) error   { return nil }
+func (f *fakeMetricsModule) BoundMetricsExportPort() int       { return f.bound }
+
+// TestRunPublishesTheBoundMetricsExportPort verifies Run reads the export port
+// from the module that serves it. The configured port says nothing about
+// whether the bind succeeded, so publishing it blindly would hand head-side
+// consumers an endpoint nothing answers on.
+func TestRunPublishesTheBoundMetricsExportPort(t *testing.T) {
 	dir := t.TempDir()
 	nodeID := ids.NewNodeID()
-	cfg := Config{SessionDir: dir, NodeID: nodeID, MetricsExportPort: 44217}
-	if err := persistAgentPorts(cfg, 12345, 54321); err != nil {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	mod := &fakeMetricsModule{bound: 4321}
+	if err := Run(ctx, Config{
+		NodeIP:            "127.0.0.1",
+		NodeID:            nodeID,
+		SessionDir:        dir,
+		GCS:               &fakeKVClient{},
+		MetricsExportPort: 44217,
+	}, []Module{mod}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := readPersistedPort(t, dir, nodeID, "metrics_export_port"); got != 4321 {
+		t.Errorf("metrics_export_port = %d, want the module's bound port 4321", got)
+	}
+}
+
+// TestPersistAgentPortsPublishesBoundExportPort verifies the export port the
+// exporter bound is the one published, so head-side consumers scrape a live
+// endpoint instead of the -1 sentinel, and that a disabled collection or a
+// failed bind still publishes the sentinel.
+func TestPersistAgentPortsPublishesBoundExportPort(t *testing.T) {
+	dir := t.TempDir()
+	nodeID := ids.NewNodeID()
+	cfg := Config{SessionDir: dir, NodeID: nodeID}
+	if err := persistAgentPorts(cfg, 12345, 54321, 44217); err != nil {
 		t.Fatalf("persistAgentPorts: %v", err)
 	}
 	if got := readPersistedPort(t, dir, nodeID, "metrics_export_port"); got != 44217 {
 		t.Errorf("metrics_export_port = %d, want 44217", got)
 	}
 
-	disabled := Config{SessionDir: dir, NodeID: nodeID, MetricsExportPort: 44217, MetricsCollectionDisabled: true}
-	if err := persistAgentPorts(disabled, 12345, 54321); err != nil {
+	disabled := Config{SessionDir: dir, NodeID: nodeID, MetricsCollectionDisabled: true}
+	if err := persistAgentPorts(disabled, 12345, 54321, 44217); err != nil {
 		t.Fatalf("persistAgentPorts: %v", err)
 	}
 	if got := readPersistedPort(t, dir, nodeID, "metrics_export_port"); got != -1 {
 		t.Errorf("metrics_export_port = %d, want -1 when metrics collection is disabled", got)
+	}
+
+	// A failed bind is reported as -1 by the module, and must not be turned
+	// into a port the agent cannot serve.
+	if err := persistAgentPorts(cfg, 12345, 54321, -1); err != nil {
+		t.Fatalf("persistAgentPorts: %v", err)
+	}
+	if got := readPersistedPort(t, dir, nodeID, "metrics_export_port"); got != -1 {
+		t.Errorf("metrics_export_port = %d, want -1 when the exporter did not bind", got)
 	}
 }
 
@@ -525,8 +572,8 @@ func testConfig(t *testing.T) Config {
 
 // readPersistedPorts reads the port-discovery files persistAgentPorts wrote
 // under SessionDir and returns the ports corresponding to a bound listener.
-// The metrics export file is written as -1 (the Go agent does not export
-// metrics), so it is skipped.
+// The metrics export file is skipped: it is republished after the modules
+// start, so on a module failure it holds the not-in-use sentinel.
 func readPersistedPorts(t *testing.T, cfg Config) []int {
 	t.Helper()
 	return []int{
