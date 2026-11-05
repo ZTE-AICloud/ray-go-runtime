@@ -45,15 +45,18 @@ func NewStatsExporter(registry *prometheus.Registry) *StatsExporter {
 // Start binds the /metrics endpoint on host:port and serves it in the
 // background until ctx is cancelled. An empty host binds every interface,
 // mirroring the Python exporter which passes no address for non-localhost
-// nodes. A non-positive port or a nil registry disables the server, and a bind
-// failure returns an error so the caller can decide whether to continue.
+// nodes. Port 0 asks the kernel for a free port, which is what a launcher that
+// does not configure one passes and what the Python agent does with the same
+// value; the bound port is published via BoundPort. A negative port or a nil
+// registry disables the server, and a bind failure returns an error so the
+// caller can decide whether to continue.
 func (e *StatsExporter) Start(ctx context.Context, host string, port int) error {
 	if e.registry == nil {
 		log.Log.Info("reporter metrics registry is nil, metrics server not started")
 		return nil
 	}
-	if port <= 0 {
-		log.Log.Info("reporter metrics export port not configured, metrics server not started")
+	if port < 0 {
+		log.Log.Info("reporter metrics export disabled, metrics server not started")
 		return nil
 	}
 

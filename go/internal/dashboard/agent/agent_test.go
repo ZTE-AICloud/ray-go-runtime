@@ -325,15 +325,15 @@ func TestRunPersistsDashboardAgentPorts(t *testing.T) {
 }
 
 // TestPersistAgentPorts verifies the exact file names and decimal contents for
-// injected bound ports. A config without an export port publishes -1 for
-// metrics_export_port, the "service not in use" sentinel.
+// the two server ports. The metrics export port is written separately, once the
+// module that serves it has bound.
 func TestPersistAgentPorts(t *testing.T) {
 	dir := t.TempDir()
 	nodeID, err := ids.NodeIDFromHex("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c")
 	if err != nil {
 		t.Fatalf("NodeIDFromHex: %v", err)
 	}
-	if err := persistAgentPorts(Config{SessionDir: dir, NodeID: nodeID}, 12345, 54321, -1); err != nil {
+	if err := persistAgentPorts(Config{SessionDir: dir, NodeID: nodeID}, 12345, 54321); err != nil {
 		t.Fatalf("persistAgentPorts: %v", err)
 	}
 	for _, c := range []struct {
@@ -341,7 +341,6 @@ func TestPersistAgentPorts(t *testing.T) {
 		want string
 	}{
 		{"metrics_agent_port", "12345"},
-		{"metrics_export_port", "-1"},
 		{"dashboard_agent_listen_port", "54321"},
 	} {
 		path := filepath.Join(dir, c.name+"_"+nodeID.Hex())
@@ -400,16 +399,16 @@ func TestPersistAgentPortsPublishesBoundExportPort(t *testing.T) {
 	dir := t.TempDir()
 	nodeID := ids.NewNodeID()
 	cfg := Config{SessionDir: dir, NodeID: nodeID}
-	if err := persistAgentPorts(cfg, 12345, 54321, 44217); err != nil {
-		t.Fatalf("persistAgentPorts: %v", err)
+	if err := persistMetricsExportPort(cfg, 44217); err != nil {
+		t.Fatalf("persistMetricsExportPort: %v", err)
 	}
 	if got := readPersistedPort(t, dir, nodeID, "metrics_export_port"); got != 44217 {
 		t.Errorf("metrics_export_port = %d, want 44217", got)
 	}
 
 	disabled := Config{SessionDir: dir, NodeID: nodeID, MetricsCollectionDisabled: true}
-	if err := persistAgentPorts(disabled, 12345, 54321, 44217); err != nil {
-		t.Fatalf("persistAgentPorts: %v", err)
+	if err := persistMetricsExportPort(disabled, 44217); err != nil {
+		t.Fatalf("persistMetricsExportPort: %v", err)
 	}
 	if got := readPersistedPort(t, dir, nodeID, "metrics_export_port"); got != -1 {
 		t.Errorf("metrics_export_port = %d, want -1 when metrics collection is disabled", got)
@@ -417,8 +416,8 @@ func TestPersistAgentPortsPublishesBoundExportPort(t *testing.T) {
 
 	// A failed bind is reported as -1 by the module, and must not be turned
 	// into a port the agent cannot serve.
-	if err := persistAgentPorts(cfg, 12345, 54321, -1); err != nil {
-		t.Fatalf("persistAgentPorts: %v", err)
+	if err := persistMetricsExportPort(cfg, -1); err != nil {
+		t.Fatalf("persistMetricsExportPort: %v", err)
 	}
 	if got := readPersistedPort(t, dir, nodeID, "metrics_export_port"); got != -1 {
 		t.Errorf("metrics_export_port = %d, want -1 when the exporter did not bind", got)

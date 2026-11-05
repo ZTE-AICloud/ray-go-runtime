@@ -103,13 +103,36 @@ func TestStatsExporterServesRegistry(t *testing.T) {
 // TestStatsExporterDisabledWithoutPort verifies a non-positive port degrades to
 // a no-op instead of binding a random port, matching the Python agent which
 // keeps running with stats disabled when the exporter cannot start.
-func TestStatsExporterDisabledWithoutPort(t *testing.T) {
+func TestStatsExporterBindsDynamicPortForZero(t *testing.T) {
 	exp := NewStatsExporter(prometheus.NewRegistry())
 	if err := exp.Start(context.Background(), "127.0.0.1", 0); err != nil {
 		t.Fatalf("Start with port 0 returned error: %v", err)
 	}
+	defer exp.Close()
+	if exp.server == nil {
+		t.Fatal("Start with port 0 did not bind a server")
+	}
+	// A launcher that configures no export port passes 0, and the Python agent
+	// allocates a free port for it; the agent then publishes the bound port, so
+	// a sentinel here would leave the node without a scrape target.
+	if got := exp.BoundPort(); got <= 0 {
+		t.Errorf("BoundPort = %d, want the dynamically allocated port", got)
+	}
+}
+
+// TestStatsExporterDisabledForNegativePort verifies a negative port disables the
+// server: the negative value is the not-in-use sentinel, not a request for a
+// dynamic allocation.
+func TestStatsExporterDisabledForNegativePort(t *testing.T) {
+	exp := NewStatsExporter(prometheus.NewRegistry())
+	if err := exp.Start(context.Background(), "127.0.0.1", -1); err != nil {
+		t.Fatalf("Start with port -1 returned error: %v", err)
+	}
 	if exp.server != nil {
-		t.Error("Start with port 0 bound a server")
+		t.Error("Start with port -1 bound a server")
+	}
+	if got := exp.BoundPort(); got != -1 {
+		t.Errorf("BoundPort = %d, want -1", got)
 	}
 	exp.Close() // must be safe when never started
 }

@@ -32,29 +32,25 @@ const (
 	dashboardAgentListenPortName = "dashboard_agent_listen_port"
 )
 
-// persistAgentPorts writes the port-discovery files raylet waits for before it
-// registers this node in GCS. All three are the ports the agent actually bound,
-// which differ from the configured 0 when dynamically allocated.
-// metrics_export_port carries the port the reporter's Prometheus exporter bound,
-// or -1 ("service not in use", mirroring the Python agent's minimal branch) when
-// the agent was launched without one, metrics collection is disabled, or the
-// bind failed.
+// persistAgentPorts writes the two server port-discovery files raylet waits for
+// before it registers this node in GCS. Both are the ports the agent actually
+// bound, which differ from the configured 0 when dynamically allocated. The
+// metrics export port is written separately by persistMetricsExportPort: it is
+// only known once the module that serves it has bound, and each file is
+// written exactly once because raylet reads a port file as soon as it appears
+// and never re-reads it.
 //
 // An empty SessionDir means there is nowhere to publish (tests that exercise
 // Run without a real session directory); persistence is skipped in that case.
-func persistAgentPorts(cfg Config, metricsAgentPort, listenPort, metricsExportPort int) error {
+func persistAgentPorts(cfg Config, metricsAgentPort, listenPort int) error {
 	if cfg.SessionDir == "" {
 		return nil
-	}
-	if cfg.MetricsCollectionDisabled {
-		metricsExportPort = -1
 	}
 	ports := []struct {
 		name string
 		port int
 	}{
 		{metricsAgentPortName, metricsAgentPort},
-		{metricsExportPortName, metricsExportPort},
 		{dashboardAgentListenPortName, listenPort},
 	}
 	for _, p := range ports {
@@ -65,11 +61,13 @@ func persistAgentPorts(cfg Config, metricsAgentPort, listenPort, metricsExportPo
 	return nil
 }
 
-// persistMetricsExportPort rewrites the metrics export port file once the module
+// persistMetricsExportPort writes the metrics export port file once the module
 // that serves it has bound, so the published value is the port something
 // actually answers on rather than the port the agent was asked for. A
 // non-positive port, or a disabled collection, publishes the not-in-use
-// sentinel.
+// sentinel. The file is written once: raylet reads a port file when it appears
+// and never re-reads it, so a placeholder followed by a rewrite would let the
+// poller latch onto the placeholder.
 func persistMetricsExportPort(cfg Config, port int) error {
 	if cfg.SessionDir == "" {
 		return nil

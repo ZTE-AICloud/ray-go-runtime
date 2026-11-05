@@ -112,13 +112,13 @@ func Run(ctx context.Context, cfg Config, mods []Module) error {
 		listenPort = listenerPort(httpSrv.listener)
 	}
 
-	// Publish the bound ports before registering the agent: when a port is 0,
-	// raylet waits for these files before it registers this node in GCS, so
-	// writing them after registration would deadlock the startup. They are
-	// written before the modules start so a module that fails cannot leave
-	// raylet waiting; the metrics export port is republished below, once the
-	// module that serves it has bound.
-	if err := persistAgentPorts(cfg, grpcPort, listenPort, -1); err != nil {
+	// Publish the two server ports before starting the modules: when a port is
+	// 0, raylet waits for these files before it registers this node in GCS, so
+	// writing them after registration would deadlock the startup, and writing
+	// them before the modules start means a module that fails cannot leave
+	// raylet waiting for them. The metrics export port is written once, below,
+	// because only the module that serves it knows the port it bound.
+	if err := persistAgentPorts(cfg, grpcPort, listenPort); err != nil {
 		shutdownServers(httpSrv, grpcSrv)
 		return fmt.Errorf("persist dashboard agent ports: %w", err)
 	}
@@ -132,9 +132,8 @@ func Run(ctx context.Context, cfg Config, mods []Module) error {
 		}
 	}
 
-	// Republish the export port now that it is known. A module whose bind
-	// failed reports -1, so the file never advertises an endpoint nothing
-	// answers on.
+	// Publish the export port now that it is known. A module whose bind failed
+	// reports -1, so the file never advertises an endpoint nothing answers on.
 	exportPort := -1
 	for _, m := range mods {
 		if e, ok := m.(metricsExporter); ok {
