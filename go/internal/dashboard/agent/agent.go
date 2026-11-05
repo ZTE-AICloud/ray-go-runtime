@@ -124,25 +124,34 @@ func Run(ctx context.Context, cfg Config, mods []Module) error {
 	}
 
 	// Start every module before serving so configuration or initialization
-	// errors surface before any traffic is accepted.
+	// errors surface before any traffic is accepted. The export port is
+	// published as soon as the module that serves it has started rather than
+	// after the last one: the raylet waits 15s for that file before it
+	// registers the node, so the wait must not depend on how long an unrelated
+	// module takes. A module whose bind failed reports -1, so the file never
+	// advertises an endpoint nothing answers on.
+	publishedExportPort := false
 	for _, m := range mods {
 		if err := m.Start(ctx); err != nil {
 			shutdownServers(httpSrv, grpcSrv)
 			return fmt.Errorf("start module: %w", err)
 		}
-	}
-
-	// Publish the export port now that it is known. A module whose bind failed
-	// reports -1, so the file never advertises an endpoint nothing answers on.
-	exportPort := -1
-	for _, m := range mods {
 		if e, ok := m.(metricsExporter); ok {
-			exportPort = e.BoundMetricsExportPort()
+			if err := persistMetricsExportPort(cfg, e.BoundMetricsExportPort()); err != nil {
+				shutdownServers(httpSrv, grpcSrv)
+				return fmt.Errorf("persist dashboard agent metrics export port: %w", err)
+			}
+			publishedExportPort = true
 		}
 	}
-	if err := persistMetricsExportPort(cfg, exportPort); err != nil {
-		shutdownServers(httpSrv, grpcSrv)
-		return fmt.Errorf("persist dashboard agent metrics export port: %w", err)
+	// The file has to exist even when nothing serves metrics, because the raylet
+	// waits for it before it registers the node: a configuration without a
+	// metrics module publishes the not-in-use sentinel rather than nothing.
+	if !publishedExportPort {
+		if err := persistMetricsExportPort(cfg, -1); err != nil {
+			shutdownServers(httpSrv, grpcSrv)
+			return fmt.Errorf("persist dashboard agent metrics export port: %w", err)
+		}
 	}
 
 	if httpSrv != nil {

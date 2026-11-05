@@ -367,6 +367,74 @@ func (f *fakeMetricsModule) RegisterHTTP(*http.ServeMux) error { return nil }
 func (f *fakeMetricsModule) RegisterGRPC(*grpc.Server) error   { return nil }
 func (f *fakeMetricsModule) BoundMetricsExportPort() int       { return f.bound }
 
+// blockingModule is a module whose Start blocks until released, so a test can
+// observe what Run published before the last module finished starting.
+type blockingModule struct {
+	release chan struct{}
+	started chan struct{}
+}
+
+func (b *blockingModule) Start(context.Context) error {
+	close(b.started)
+	<-b.release
+	return nil
+}
+
+func (b *blockingModule) RegisterHTTP(*http.ServeMux) error { return nil }
+func (b *blockingModule) RegisterGRPC(*grpc.Server) error   { return nil }
+
+// TestRunPublishesTheExportPortBeforeTheLastModuleStarts verifies the export
+// port file appears as soon as the module that serves it has started. The
+// raylet waits 15s for that file before it registers the node, so tying the
+// write to the slowest unrelated module would put a node's startup on whatever
+// that module happens to need.
+func TestRunPublishesTheExportPortBeforeTheLastModuleStarts(t *testing.T) {
+	dir := t.TempDir()
+	nodeID := ids.NewNodeID()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	blocking := &blockingModule{release: make(chan struct{}), started: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, Config{
+			NodeIP:     "127.0.0.1",
+			NodeID:     nodeID,
+			SessionDir: dir,
+			GCS:        &fakeKVClient{},
+		}, []Module{&fakeMetricsModule{bound: 4321}, blocking})
+	}()
+
+	select {
+	case <-blocking.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the blocking module never started")
+	}
+
+	path := filepath.Join(dir, "metrics_export_port_"+nodeID.Hex())
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if data, err := os.ReadFile(path); err == nil {
+			if got := strings.TrimSpace(string(data)); got != "4321" {
+				t.Fatalf("metrics_export_port = %q, want 4321", got)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("metrics_export_port was not published while the last module was still starting")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	close(blocking.release)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after the module was released")
+	}
+}
+
 // TestRunPublishesTheBoundMetricsExportPort verifies Run reads the export port
 // from the module that serves it. The configured port says nothing about
 // whether the bind succeeded, so publishing it blindly would hand head-side
