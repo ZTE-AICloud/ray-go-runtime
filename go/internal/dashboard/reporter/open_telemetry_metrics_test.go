@@ -283,22 +283,81 @@ func TestOTelExportNonMonotonicSumIsGauge(t *testing.T) {
 // follows it and is gone from the next scrape, because the collector consumed
 // and cleared its pending observations. This is what removes the metrics of a
 // component that stopped reporting.
-func TestOTelExportGaugeIsClearedPerCollect(t *testing.T) {
+// TestOTelExportGaugeSurvivesScrapesUntilTTL verifies a reported gauge value is
+// served to every scrape until it ages out, instead of being consumed by the
+// first one. A scrape interval shorter than the report interval would otherwise
+// blank the series between two reports, which is the behaviour the Python
+// recorder explicitly avoids.
+func TestOTelExportGaugeSurvivesScrapesUntilTTL(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	service := NewOpenTelemetryMetricsService(registry, false)
 
+	// The first export registers the instrument; the clock is pinned afterwards
+	// so the timestamp it records is the one the test controls.
+	if _, err := service.Export(context.Background(), exportRequest(
+		gaugeMetric("node_cpu_usage", "cpu usage", numberPoint(0.5, stringAttr("ip", "1.2.3.4"))),
+	)); err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	base := time.Now()
+	store := instrumentStore(t, service, "node_cpu_usage")
+	store.now = func() time.Time { return base }
+	store.ttl = 20 * time.Second
 	if _, err := service.Export(context.Background(), exportRequest(
 		gaugeMetric("node_cpu_usage", "cpu usage", numberPoint(0.5, stringAttr("ip", "1.2.3.4"))),
 	)); err != nil {
 		t.Fatalf("Export: %v", err)
 	}
 
-	if got := countSamples(t, registry, "ray_node_cpu_usage"); got != 1 {
-		t.Fatalf("first scrape samples = %d, want 1", got)
+	for scrape := 1; scrape <= 3; scrape++ {
+		if got := countSamples(t, registry, "ray_node_cpu_usage"); got != 1 {
+			t.Fatalf("scrape %d samples = %d, want 1 (retained for the ttl)", scrape, got)
+		}
 	}
+
+	store.now = func() time.Time { return base.Add(21 * time.Second) }
 	if got := countSamples(t, registry, "ray_node_cpu_usage"); got != 0 {
-		t.Errorf("second scrape samples = %d, want 0 (observations must be cleared on collect)", got)
+		t.Errorf("samples after the ttl = %d, want 0 (the observation aged out)", got)
 	}
+}
+
+// TestOTelExportNonMonotonicSumAccumulates verifies the points of a
+// non-monotonic sum add up across reports. Each point carries the increment
+// since the previous report, so replacing the value would keep only the last
+// one and undercount by as many reports as the scrape interval holds.
+func TestOTelExportNonMonotonicSumAccumulates(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	service := NewOpenTelemetryMetricsService(registry, false)
+
+	for _, increment := range []float64{2, 3, 5} {
+		if _, err := service.Export(context.Background(), exportRequest(
+			sumMetric("worker_tasks", "tasks", false, numberPoint(increment, stringAttr("ip", "1.2.3.4"))),
+		)); err != nil {
+			t.Fatalf("Export: %v", err)
+		}
+	}
+
+	samples := samplesOf(t, registry, "ray_worker_tasks")
+	if len(samples) != 1 {
+		t.Fatalf("samples = %d, want 1", len(samples))
+	}
+	if got := samples[0].GetGauge().GetValue(); got != 10 {
+		t.Errorf("value = %v, want 10 (2+3+5 across three reports)", got)
+	}
+}
+
+// instrumentStore returns the observation store of a registered observable
+// gauge so a test can control its clock and retention window.
+func instrumentStore(t *testing.T, service *OpenTelemetryMetricsService, name string) *otelGaugeStore {
+	t.Helper()
+	instrument, ok := service.instruments[name]
+	if !ok {
+		t.Fatalf("instrument %q not registered", name)
+	}
+	if instrument.store == nil {
+		t.Fatalf("instrument %q has no observation store", name)
+	}
+	return instrument.store
 }
 
 // TestOTelExportGaugeKeepsLatestValuePerSeries verifies an observable gauge

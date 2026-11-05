@@ -24,8 +24,10 @@ import (
 	"context"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/ray-project/ray/go/internal/common"
@@ -264,10 +266,12 @@ func labelsInOrder(labelKeys []string, labels prometheus.Labels) []string {
 	return values
 }
 
-// otelObservation is one reported value for one series of an observable gauge.
+// otelObservation is one reported value for one series of an observable gauge,
+// together with the monotonic instant it was reported at.
 type otelObservation struct {
 	tags  map[string]string
 	value float64
+	at    time.Time
 }
 
 // otelGaugeStore holds the observations reported for one observable gauge. The
@@ -279,15 +283,23 @@ type otelObservation struct {
 type otelGaugeStore struct {
 	mu           sync.Mutex
 	observations map[string]otelObservation
+	// ttl is how long an observation is served without being refreshed. The
+	// Python recorder retains a value for two export intervals so a series that
+	// is being reported survives a scrape that lands between reports, and a
+	// series whose emitter stopped ages out.
+	ttl time.Duration
+	// now is the clock, so a test can advance it past the ttl.
+	now func() time.Time
 }
 
 // otelObservableGauge is the Go counterpart of an OpenTelemetry observable
 // gauge. Python registers a callback that the SDK invokes once per collection;
 // client_golang invokes Collect once per scrape, so Collect performs the same
-// work: snapshot the pending observations, aggregate the series that collapse
-// onto one label set, emit them and clear them. Clearing is what makes a series
-// whose component stopped reporting disappear from /metrics, exactly as the
-// Python callback's clear-on-collect does.
+// work: drop the observations that have aged out, aggregate the series that
+// collapse onto one label set, and emit them. It deliberately does not clear
+// what it consumed: with a scrape interval shorter than the report interval,
+// clearing would blank the series between two reports, which is the behaviour
+// the Python recorder calls out and avoids.
 type otelObservableGauge struct {
 	desc      *prometheus.Desc
 	labelKeys []string
@@ -301,11 +313,18 @@ func (g *otelObservableGauge) Describe(ch chan<- *prometheus.Desc) {
 }
 
 // Collect implements prometheus.Collector by emitting one gauge sample per
-// aggregated label set and clearing the observations it consumed.
+// aggregated label set, evicting the observations that outlived the ttl.
 func (g *otelObservableGauge) Collect(ch chan<- prometheus.Metric) {
+	now := g.store.now()
 	g.store.mu.Lock()
-	pending := g.store.observations
-	g.store.observations = make(map[string]otelObservation, len(pending))
+	pending := make(map[string]otelObservation, len(g.store.observations))
+	for tags, obs := range g.store.observations {
+		if now.Sub(obs.at) <= g.store.ttl {
+			pending[tags] = obs
+			continue
+		}
+		delete(g.store.observations, tags)
+	}
 	g.store.mu.Unlock()
 
 	type series struct {
@@ -525,7 +544,7 @@ func (s *OpenTelemetryMetricsService) setMetricValue(name string, tags map[strin
 
 	if instrument.store != nil {
 		instrument.store.mu.Lock()
-		instrument.store.observations[tagsKey(tags)] = otelObservation{tags: tags, value: value}
+		instrument.store.observations[tagsKey(tags)] = otelObservation{tags: tags, value: value, at: instrument.store.now()}
 		instrument.store.mu.Unlock()
 		return
 	}
@@ -535,7 +554,11 @@ func (s *OpenTelemetryMetricsService) setMetricValue(name string, tags map[strin
 	case *prometheus.CounterVec:
 		collector.With(labels).Add(value)
 	case *prometheus.GaugeVec:
-		collector.With(labels).Set(value)
+		// The only gauge that reaches here is a non-monotonic sum, which is
+		// modelled as an up-down counter: its points carry the increment since
+		// the previous report, so they accumulate rather than replace. The
+		// observable gauges went through the store above.
+		collector.With(labels).Add(value)
 	case *prometheus.HistogramVec:
 		collector.With(labels).Observe(value)
 	default:
@@ -552,7 +575,11 @@ func (s *OpenTelemetryMetricsService) registerGaugeMetric(name, description stri
 	if _, ok := s.instruments[name]; ok {
 		return
 	}
-	store := &otelGaugeStore{observations: make(map[string]otelObservation)}
+	store := &otelGaugeStore{
+		observations: make(map[string]otelObservation),
+		ttl:          gaugeMetricTTL(),
+		now:          time.Now,
+	}
 	gauge := &otelObservableGauge{
 		desc:      prometheus.NewDesc(metricNamespace+"_"+name, description, labelKeys, nil),
 		labelKeys: labelKeys,
@@ -653,4 +680,32 @@ func (s *OpenTelemetryMetricsService) histogramBucketMidpoints(name string) []fl
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.midpoints[name]
+}
+
+// Metrics report interval knobs, mirroring the Python recorder's derivation of
+// the gauge retention window: the emitter floors the report interval at one
+// second (src/ray/stats/stats.h SetReportInterval), and a reported value is
+// served for two intervals so a scrape landing between two reports still sees
+// it.
+const (
+	metricsReportIntervalEnvVar = "RAY_metrics_report_interval_ms"
+	defaultReportIntervalMs     = 10_000
+	minReportIntervalMs         = 1_000
+)
+
+// gaugeMetricTTL returns how long a reported gauge observation is served
+// without being refreshed, matching OpenTelemetryMetricRecorder's
+// _resolve_gauge_ttl_seconds: twice the effective export interval, with the
+// interval floored at one second and defaulting to the RayConfig value.
+func gaugeMetricTTL() time.Duration {
+	intervalMs := defaultReportIntervalMs
+	if raw := os.Getenv(metricsReportIntervalEnvVar); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			intervalMs = v
+		}
+	}
+	if intervalMs < minReportIntervalMs {
+		intervalMs = minReportIntervalMs
+	}
+	return time.Duration(2*intervalMs) * time.Millisecond
 }
