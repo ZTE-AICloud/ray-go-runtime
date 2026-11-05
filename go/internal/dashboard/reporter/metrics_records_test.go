@@ -398,7 +398,7 @@ func componentRecordCount(records []gaugeRecord, component string) int {
 // and `if total_pss > 0.0` guards. The fixture carries memory_info but no
 // memory_full_info at all, which is how a process without a readable
 // smaps_rollup is reported.
-func TestComponentRecordsOmitUSSAndPSSWhenZero(t *testing.T) {
+func TestComponentRecordsOmitUSSWhenZero(t *testing.T) {
 	stats := map[string]interface{}{
 		"ip": "10.0.0.7",
 		"raylet": map[string]interface{}{

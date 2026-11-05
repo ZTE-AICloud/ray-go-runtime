@@ -76,8 +76,14 @@ func pythonGaugeTable() []pythonGauge {
 }
 
 // TestMetricsGaugesMatchPythonTable asserts the Go gauge table is identical to
-// the Python METRICS_GAUGES mapping: same count (41), same order, and for every
-// entry the same name, help text and label keys.
+// pythonGaugeTable, a snapshot transcribed from the Python METRICS_GAUGES
+// mapping: same count, same order, and for every entry the same name, help text
+// and label keys.
+//
+// The snapshot is hand-maintained, so it catches the Go table drifting away from
+// it but not the Python table moving away from both. Re-transcribe it whenever
+// the Python mapping changes; the count is asserted separately below so a
+// dropped entry cannot pass unnoticed.
 func TestMetricsGaugesMatchPythonTable(t *testing.T) {
 	want := pythonGaugeTable()
 	if len(metricsGauges) != len(want) {
