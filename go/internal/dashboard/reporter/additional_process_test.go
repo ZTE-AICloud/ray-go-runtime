@@ -426,7 +426,7 @@ func TestCollectFeedsAdditionalToRecords(t *testing.T) {
 			ComponentGaugeCPUPercentage, pid, componentPIDs(cpuRecords))
 	}
 
-	for _, gauge := range []string{ComponentGaugeRSSMB, ComponentGaugeNumFDs, ComponentGaugeMemSharedBytes} {
+	for _, gauge := range []string{ComponentGaugeRSSMB, ComponentGaugeNumFDs, ComponentGaugeSharedBytes} {
 		if len(findRecords(records, gauge)) == 0 {
 			t.Errorf("gauge %s missing for the discovered runtime_env_agent", gauge)
 		}
