@@ -36,7 +36,7 @@ type MetricsService struct {
 
 // NewMetricsService returns a MetricsService that registers exported metrics
 // on the given Prometheus registry. The registry is supplied by the module
-// assembly (T10) so the Prometheus exporter can scrape the same registry.
+// assembly so the Prometheus exporter can scrape the same registry.
 func NewMetricsService(registry *prometheus.Registry) *MetricsService {
 	proxy := newOpenCensusProxyCollector(componentTimeout())
 	if registry != nil {

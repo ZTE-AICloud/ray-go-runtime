@@ -33,14 +33,15 @@ const (
 // Component metric gauge names, aligned with the Python METRICS_GAUGES
 // definitions in reporter_agent.py.
 const (
-	ComponentGaugeCPUPercentage  = "component_cpu_percentage"
-	ComponentGaugeMemSharedBytes = "component_mem_shared_bytes"
-	ComponentGaugeRSSMB          = "component_rss_mb"
-	ComponentGaugeUSSMB          = "component_uss_mb"
-	ComponentGaugePSSMB          = "component_pss_mb"
-	ComponentGaugeNumFDs         = "component_num_fds"
-	ComponentGaugeGPUPercentage  = "component_gpu_percentage"
-	ComponentGaugeGPUMemoryMB    = "component_gpu_memory_mb"
+	ComponentGaugeCPUPercentage = "component_cpu_percentage"
+	ComponentGaugeSharedBytes   = "component_shared_bytes"
+	ComponentGaugeRSSMB         = "component_rss_mb"
+	ComponentGaugeUSSMB         = "component_uss_mb"
+	ComponentGaugeRSSBytes      = "component_rss_bytes"
+	ComponentGaugeUSSBytes      = "component_uss_bytes"
+	ComponentGaugeNumFDs        = "component_num_fds"
+	ComponentGaugeGPUPercentage = "component_gpu_percentage"
+	ComponentGaugeGPUMemoryMB   = "component_gpu_memory_mb"
 )
 
 // reporterUpdateIntervalEnv is the environment variable that overrides the

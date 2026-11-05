@@ -49,6 +49,13 @@ type GpuUtilizationInfo struct {
 	UtilizationGPU int
 	MemoryUsed     int64
 	MemoryTotal    int64
+	// PowerMW and TemperatureC are optional: nvidia-smi reports [N/A] for a
+	// device that does not expose them, and the Python provider maps that to a
+	// None it then skips. The Has flags carry that distinction.
+	PowerMW        int64
+	HasPower       bool
+	TemperatureC   int64
+	HasTemperature bool
 	ProcessesPIDs  map[int]ProcessGPUInfo
 }
 
@@ -66,7 +73,7 @@ var runCommand commandRunner = func(name string, arg ...string) ([]byte, error) 
 // arguments as a constant whitelist prevents any external string from being
 // injected into the command line.
 var gpuQueryArgs = []string{
-	"--query-gpu=index,uuid,name,utilization.gpu,memory.used,memory.total",
+	"--query-gpu=index,uuid,name,utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu",
 	"--format=csv,noheader,nounits",
 }
 
@@ -467,6 +474,12 @@ func parseGPUCsv(out []byte) []GpuUtilizationInfo {
 		}
 		memUsed, _ := strconv.ParseInt(strings.TrimSpace(rec[4]), 10, 64)
 		memTotal, _ := strconv.ParseInt(strings.TrimSpace(rec[5]), 10, 64)
+		// power.draw is reported in watts with a fractional part; NVML (and the
+		// Python provider) reports milliwatts, so the value is scaled here. A
+		// driver without the sensor reports [N/A], which parses to the "no
+		// value" the record layer skips.
+		powerMW, hasPower := parseGPUWattsAsMilliwatts(rec, 6)
+		temperature, hasTemperature := parseGPUInt(rec, 7)
 		gpus = append(gpus, GpuUtilizationInfo{
 			Index:          index,
 			UUID:           uuid,
@@ -474,6 +487,10 @@ func parseGPUCsv(out []byte) []GpuUtilizationInfo {
 			UtilizationGPU: util,
 			MemoryUsed:     memUsed,
 			MemoryTotal:    memTotal,
+			PowerMW:        powerMW,
+			HasPower:       hasPower,
+			TemperatureC:   temperature,
+			HasTemperature: hasTemperature,
 			ProcessesPIDs:  map[int]ProcessGPUInfo{},
 		})
 	}
@@ -666,4 +683,34 @@ func parseMIGTable(out []byte) map[[2]int]migTableStats {
 		stats[[2]int{gpuIndex, migDev}] = entry
 	}
 	return stats
+}
+
+// parseGPUWattsAsMilliwatts reads a watts field and scales it to milliwatts,
+// reporting false when the field is absent or the driver answered [N/A].
+func parseGPUWattsAsMilliwatts(rec []string, idx int) (int64, bool) {
+	if idx >= len(rec) {
+		return 0, false
+	}
+	raw := strings.TrimSpace(rec[idx])
+	if raw == "" {
+		return 0, false
+	}
+	watts, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, false
+	}
+	return int64(watts * 1000), true
+}
+
+// parseGPUInt reads an integer field, reporting false when the field is absent
+// or not a number.
+func parseGPUInt(rec []string, idx int) (int64, bool) {
+	if idx >= len(rec) {
+		return 0, false
+	}
+	v, err := strconv.ParseInt(strings.TrimSpace(rec[idx]), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
 }

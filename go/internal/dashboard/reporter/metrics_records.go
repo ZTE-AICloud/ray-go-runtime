@@ -175,7 +175,7 @@ func sortedKeys(m map[string]int) []string {
 // nodeRecords builds the node-level records (CPU, memory, disk IO, disk usage
 // and network) in the same order as the Python _to_records list.
 func nodeRecords(stats map[string]interface{}, tags map[string]string) []gaugeRecord {
-	records := make([]gaugeRecord, 0, 21)
+	records := make([]gaugeRecord, 0, 28)
 
 	add := func(name string, value float64) {
 		records = append(records, gaugeRecord{Gauge: gaugeOf(name), Value: value, Tags: tags})
@@ -196,6 +196,22 @@ func nodeRecords(stats map[string]interface{}, tags map[string]string) []gaugeRe
 	}
 	if shm := asFloat(stats["shm"]); shm != 0 {
 		add(GaugeNodeMemSharedBytes, shm)
+	}
+	if hostMem, ok := stats["host_mem"].([]interface{}); ok && len(hostMem) == 2 {
+		add(GaugeNodeMemUsedHost, asFloat(hostMem[0]))
+		add(GaugeNodeMemTotalHost, asFloat(hostMem[1]))
+	}
+	// Swap is only reported when the flag asks for it and the node has swap;
+	// a constant zero series on every node is noise on the dashboards.
+	if swap, ok := stats["swap"].([]interface{}); ok && len(swap) == 3 {
+		add(GaugeNodeSwapTotal, asFloat(swap[0]))
+		add(GaugeNodeSwapUsed, asFloat(swap[1]))
+		add(GaugeNodeSwapUtilization, asFloat(swap[2]))
+	}
+	// The container figures only exist where a cgroup memory controller does.
+	if cgroup, ok := stats["cgroup_mem"].([]interface{}); ok && len(cgroup) == 2 {
+		add(GaugeNodeCgroupMemUsed, asFloat(cgroup[0]))
+		add(GaugeNodeCgroupMemTotal, asFloat(cgroup[1]))
 	}
 
 	diskIO, _ := stats["disk_io"].(DiskIOMetrics)
@@ -251,6 +267,9 @@ func gpuRecords(stats map[string]interface{}, tags map[string]string) []gaugeRec
 		if gpu.Name != "" {
 			gpuTags["GpuDeviceName"] = gpu.Name
 		}
+		if gpu.UUID != "" {
+			gpuTags["GpuUuid"] = gpu.UUID
+		}
 		dev := mergeTags(tags, gpuTags)
 
 		// There is only one GPU per index, so availability is recorded as 1.
@@ -258,6 +277,15 @@ func gpuRecords(stats map[string]interface{}, tags map[string]string) []gaugeRec
 		records = append(records, gaugeRecord{Gauge: gaugeOf(GaugeNodeGPUsUtilization), Value: float64(gpu.UtilizationGPU), Tags: dev})
 		records = append(records, gaugeRecord{Gauge: gaugeOf(GaugeNodeGRAMUsed), Value: float64(gpu.MemoryUsed), Tags: dev})
 		records = append(records, gaugeRecord{Gauge: gaugeOf(GaugeNodeGRAMAvaliable), Value: float64(gpu.MemoryTotal - gpu.MemoryUsed), Tags: dev})
+		// Power and temperature are only reported by devices that expose them,
+		// mirroring the Python provider's optional None: a series of zeros for
+		// every unsupported card would be worse than no series.
+		if gpu.HasPower {
+			records = append(records, gaugeRecord{Gauge: gaugeOf(GaugeNodeGPUPower), Value: float64(gpu.PowerMW), Tags: dev})
+		}
+		if gpu.HasTemperature {
+			records = append(records, gaugeRecord{Gauge: gaugeOf(GaugeNodeGPUTemperature), Value: float64(gpu.TemperatureC), Tags: dev})
+		}
 	}
 	return records
 }
@@ -391,7 +419,7 @@ func (s *recordsState) additionalRecords(stats map[string]interface{}, ip string
 // pass their pid while the worker grouping deliberately leaves it unset, so a
 // worker record carries no pid label even though its stats do.
 func systemStatsRecords(statsList []map[string]interface{}, component, ip, pid string) []gaugeRecord {
-	var totalCPU, totalGPUPct, totalGPUMem, totalRSS, totalUSS, totalPSS, totalShm float64
+	var totalCPU, totalGPUPct, totalGPUMem, totalRSS, totalRSSBytes, totalUSS, totalUSSBytes, totalShm float64
 	var totalNumFDs int
 
 	for _, stat := range statsList {
@@ -399,12 +427,13 @@ func systemStatsRecords(statsList []map[string]interface{}, component, ip, pid s
 		totalGPUPct += asFloat(stat["gpu_utilization"])
 		totalGPUMem += asFloat(stat["gpu_memory_usage"])
 		if mem, ok := stat["memory_info"].(map[string]interface{}); ok {
-			totalRSS += asFloat(mem["rss"]) / 1.0e6
+			totalRSSBytes += asFloat(mem["rss"])
+			totalRSS = totalRSSBytes / 1.0e6
 			totalShm += asFloat(mem["shared"])
 		}
 		if mem, ok := stat["memory_full_info"].(map[string]interface{}); ok {
-			totalUSS += asFloat(mem["uss"]) / 1.0e6
-			totalPSS += asFloat(mem["pss"]) / 1.0e6
+			totalUSSBytes += asFloat(mem["uss"])
+			totalUSS = totalUSSBytes / 1.0e6
 		}
 		totalNumFDs += asInt(stat["num_fds"])
 	}
@@ -416,14 +445,13 @@ func systemStatsRecords(statsList []map[string]interface{}, component, ip, pid s
 
 	records := []gaugeRecord{
 		{Gauge: gaugeOf(ComponentGaugeCPUPercentage), Value: totalCPU, Tags: tags},
-		{Gauge: gaugeOf(ComponentGaugeMemSharedBytes), Value: totalShm, Tags: tags},
+		{Gauge: gaugeOf(ComponentGaugeSharedBytes), Value: totalShm, Tags: tags},
 		{Gauge: gaugeOf(ComponentGaugeRSSMB), Value: totalRSS, Tags: tags},
+		{Gauge: gaugeOf(ComponentGaugeRSSBytes), Value: totalRSSBytes, Tags: tags},
 	}
 	if totalUSS > 0 {
 		records = append(records, gaugeRecord{Gauge: gaugeOf(ComponentGaugeUSSMB), Value: totalUSS, Tags: tags})
-	}
-	if totalPSS > 0 {
-		records = append(records, gaugeRecord{Gauge: gaugeOf(ComponentGaugePSSMB), Value: totalPSS, Tags: tags})
+		records = append(records, gaugeRecord{Gauge: gaugeOf(ComponentGaugeUSSBytes), Value: totalUSSBytes, Tags: tags})
 	}
 	records = append(records, gaugeRecord{Gauge: gaugeOf(ComponentGaugeNumFDs), Value: float64(totalNumFDs), Tags: tags})
 
@@ -441,10 +469,11 @@ func systemStatsRecords(statsList []map[string]interface{}, component, ip, pid s
 func resetComponentRecords(names []string, ip string) []gaugeRecord {
 	gauges := []string{
 		ComponentGaugeCPUPercentage,
-		ComponentGaugeMemSharedBytes,
+		ComponentGaugeSharedBytes,
 		ComponentGaugeRSSMB,
+		ComponentGaugeRSSBytes,
 		ComponentGaugeUSSMB,
-		ComponentGaugePSSMB,
+		ComponentGaugeUSSBytes,
 		ComponentGaugeNumFDs,
 	}
 	var records []gaugeRecord

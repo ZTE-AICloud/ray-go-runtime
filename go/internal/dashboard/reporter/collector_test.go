@@ -9,6 +9,9 @@ type fakeSource struct {
 	cpuP        float64
 	cpus        []int
 	mem         MemInfo
+	hostMem     HostMemInfo
+	swap        SwapInfo
+	cgroupMem   CgroupMemInfo
 	shm         int64
 	shmOK       bool
 	disk        map[string]DiskInfo
@@ -46,6 +49,27 @@ func (f *fakeSource) memUsage() (MemInfo, error) {
 	}
 	return f.mem, nil
 }
+func (f *fakeSource) hostMemUsage() (HostMemInfo, error) {
+	if err := f.errs["host_mem"]; err != nil {
+		return HostMemInfo{}, err
+	}
+	return f.hostMem, nil
+}
+
+func (f *fakeSource) swapUsage() (SwapInfo, error) {
+	if err := f.errs["swap"]; err != nil {
+		return SwapInfo{}, err
+	}
+	return f.swap, nil
+}
+
+func (f *fakeSource) cgroupMemUsage() (CgroupMemInfo, error) {
+	if err := f.errs["cgroup_mem"]; err != nil {
+		return CgroupMemInfo{}, err
+	}
+	return f.cgroupMem, nil
+}
+
 func (f *fakeSource) shmUsage() (int64, bool, error) {
 	if err := f.errs["shm"]; err != nil {
 		return 0, false, err

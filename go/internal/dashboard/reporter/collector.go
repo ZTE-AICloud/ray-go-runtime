@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -69,6 +70,9 @@ type statsSource interface {
 	cpuPercent() (float64, error)
 	cpuCounts() ([]int, error)
 	memUsage() (MemInfo, error)
+	hostMemUsage() (HostMemInfo, error)
+	swapUsage() (SwapInfo, error)
+	cgroupMemUsage() (CgroupMemInfo, error)
 	shmUsage() (int64, bool, error)
 	diskUsage() (map[string]DiskInfo, error)
 	diskIO() (DiskIOMetrics, error)
@@ -132,6 +136,9 @@ func (c *StatsCollector) Collect() map[string]interface{} {
 	cpus, _ := c.src.cpuCounts()
 	mem, _ := c.src.memUsage()
 	shm, shmOK, _ := c.src.shmUsage()
+	hostMem, _ := c.src.hostMemUsage()
+	swap, _ := c.src.swapUsage()
+	cgroupMem, _ := c.src.cgroupMemUsage()
 	disk, _ := c.src.diskUsage()
 	diskIO, _ := c.src.diskIO()
 	diskIOSpeed, _ := c.src.diskIOSpeed()
@@ -156,6 +163,9 @@ func (c *StatsCollector) Collect() map[string]interface{} {
 		"cpu":           cpu,
 		"cpus":          cpus,
 		"mem":           []interface{}{mem.Total, mem.Available, mem.Percent, mem.Used},
+		"host_mem":      []interface{}{hostMem.Used, hostMem.Total},
+		"swap":          swapStat(swap),
+		"cgroup_mem":    cgroupMemStat(cgroupMem),
 		"shm":           shmVal,
 		"workers":       workers,
 		"raylet":        raylet,
@@ -1643,4 +1653,134 @@ func splitCmdline(raw string) []string {
 		return []string{}
 	}
 	return strings.Split(raw, "\x00")
+}
+
+const (
+	// countSwapInMemoryMonitorEnvVar gates the swap gauges, mirroring the
+	// Python RAY_count_swap_in_memory_monitor check: swap that is not counted
+	// by the memory monitor has nothing to contribute to the dashboards.
+	countSwapInMemoryMonitorEnvVar = "RAY_count_swap_in_memory_monitor"
+)
+
+var (
+	// errSwapDisabled says swap reporting is switched off.
+	errSwapDisabled = errors.New("swap reporting disabled")
+	// errNoCgroupMem says the host has no cgroup memory controller to report.
+	errNoCgroupMem = errors.New("no cgroup memory controller")
+)
+
+// envTrue reports whether an environment variable holds a Ray bool true value
+// ("1" or "true", case-insensitive), matching Python's env_bool.
+func envTrue(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true":
+		return true
+	default:
+		return false
+	}
+}
+
+// HostMemInfo is the host's physical memory, independent of any cgroup limit,
+// mirroring the psutil.virtual_memory pair the Python reporter reports as
+// node_mem_used_host / node_mem_total_host.
+type HostMemInfo struct {
+	Used  int64
+	Total int64
+}
+
+// hostMemUsage reads the host memory totals from /proc/meminfo. Unlike
+// memUsage it never consults the cgroup: reporting the confined and the
+// physical figure side by side is the point of the two host gauges.
+func (s *systemSource) hostMemUsage() (HostMemInfo, error) {
+	values, err := s.meminfo()
+	if err != nil {
+		return HostMemInfo{}, err
+	}
+	total, ok := values["MemTotal"]
+	if !ok {
+		return HostMemInfo{}, os.ErrNotExist
+	}
+	avail, ok := values["MemAvailable"]
+	if !ok || avail == 0 {
+		avail = values["MemFree"] + values["Cached"]
+	}
+	used := total - avail
+	if used < 0 {
+		used = 0
+	}
+	return HostMemInfo{Used: used, Total: total}, nil
+}
+
+// SwapInfo is the swap figure the Python reporter reports as node_swap_*,
+// already clamped the way it clamps: a used value outside [0, total] is
+// impossible and would make the utilization nonsensical.
+type SwapInfo struct {
+	Total   int64
+	Used    int64
+	Percent float64
+}
+
+// swapUsage mirrors ReporterAgent._get_swap_usage: swap is only reported when
+// RAY_count_swap_in_memory_monitor asks for it, because a constant zero series
+// on every node is noise on the dashboards.
+func (s *systemSource) swapUsage() (SwapInfo, error) {
+	if !envTrue(countSwapInMemoryMonitorEnvVar) {
+		return SwapInfo{}, errSwapDisabled
+	}
+	values, err := s.meminfo()
+	if err != nil {
+		return SwapInfo{}, err
+	}
+	total := values["SwapTotal"]
+	used := total - values["SwapFree"]
+	if used < 0 {
+		used = 0
+	}
+	if used > total {
+		used = total
+	}
+	percent := 0.0
+	if total > 0 {
+		percent = roundToDecimals(float64(used)/float64(total), 3) * 100
+	}
+	return SwapInfo{Total: total, Used: used, Percent: percent}, nil
+}
+
+// CgroupMemInfo is the container memory figure reported as node_cgroup_mem_*.
+type CgroupMemInfo struct {
+	Used  int64
+	Total int64
+}
+
+// cgroupMemUsage reports the container memory usage and limit, the pair Python
+// reads from ray._common.utils.get_cgroup_mem_stats. A host without a cgroup
+// memory controller has nothing to report, which is what the nil-able stat
+// entry expresses.
+func (s *systemSource) cgroupMemUsage() (CgroupMemInfo, error) {
+	used, haveUsed := cgroupUsedMemory()
+	limit, haveLimit := cgroupMemLimitBytes()
+	if !haveUsed && !haveLimit {
+		return CgroupMemInfo{}, errNoCgroupMem
+	}
+	return CgroupMemInfo{Used: used, Total: limit}, nil
+}
+
+// swapStat renders the swap entry: the tuple the record layer reads, or nil
+// when there is nothing to report. A zero total is nothing to report even when
+// the flag is on, mirroring the Python guard that keeps constant zeros off the
+// dashboards.
+func swapStat(info SwapInfo) interface{} {
+	if info.Total <= 0 {
+		return nil
+	}
+	return []interface{}{info.Total, info.Used, info.Percent}
+}
+
+// cgroupMemStat renders the cgroup memory entry, or nil when the host has no
+// cgroup memory controller.
+func cgroupMemStat(info CgroupMemInfo) interface{} {
+	if info.Total <= 0 && info.Used <= 0 {
+		return nil
+	}
+	return []interface{}{info.Used, info.Total}
 }

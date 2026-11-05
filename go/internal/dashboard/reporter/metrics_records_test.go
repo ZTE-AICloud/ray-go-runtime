@@ -79,11 +79,14 @@ func metricRecordStats() map[string]interface{} {
 		"gpu_utilization":  30,
 	}
 	return map[string]interface{}{
-		"ip":   "10.0.0.7",
-		"cpu":  37.5,
-		"cpus": []int{8, 4},
-		"mem":  []interface{}{int64(100_000), int64(40_000), 60.0, int64(60_000)},
-		"shm":  int64(65536),
+		"ip":         "10.0.0.7",
+		"cpu":        37.5,
+		"cpus":       []int{8, 4},
+		"mem":        []interface{}{int64(100_000), int64(40_000), 60.0, int64(60_000)},
+		"host_mem":   []interface{}{int64(70_000), int64(200_000)},
+		"swap":       []interface{}{int64(8_000), int64(2_000), 25.0},
+		"cgroup_mem": []interface{}{int64(60_000), int64(100_000)},
+		"shm":        int64(65536),
 		"disk_io": DiskIOMetrics{
 			ReadBytes: 1000, WriteBytes: 2000, ReadCount: 11, WriteCount: 22,
 		},
@@ -95,6 +98,7 @@ func metricRecordStats() map[string]interface{} {
 		"network_speed": []float64{5.5, 6.5},
 		"gpus": []GpuUtilizationInfo{{
 			Index: 0, Name: "Tesla T4", UUID: "gpu-0", UtilizationGPU: 55, MemoryUsed: 1024, MemoryTotal: 16384,
+			PowerMW: 70_000, HasPower: true, TemperatureC: 61, HasTemperature: true,
 		}},
 		"tpus": []TpuUtilizationInfo{{
 			Index: 1, Name: "tpu-1", TPUType: "v4", TPUTopology: "2x2",
@@ -313,23 +317,28 @@ func TestComponentRecordsAggregateAndConvertUnits(t *testing.T) {
 	assertTag(t, raylet, "ip", "10.0.0.7")
 
 	rssBy := byComponent(findRecords(records, ComponentGaugeRSSMB))
-	sharedBy := byComponent(findRecords(records, ComponentGaugeMemSharedBytes))
+	rssBytesBy := byComponent(findRecords(records, ComponentGaugeRSSBytes))
+	sharedBy := byComponent(findRecords(records, ComponentGaugeSharedBytes))
 	ussBy := byComponent(findRecords(records, ComponentGaugeUSSMB))
-	pssBy := byComponent(findRecords(records, ComponentGaugePSSMB))
+	ussBytesBy := byComponent(findRecords(records, ComponentGaugeUSSBytes))
 	fdsBy := byComponent(findRecords(records, ComponentGaugeNumFDs))
 
-	// RSS/USS/PSS are bytes -> MB (divide by 1e6); shared memory stays in bytes.
+	// RSS and USS are reported both in bytes and in MB (bytes / 1e6); shared
+	// memory stays in bytes.
 	if got := rssBy["raylet"].Value; got != 10 {
 		t.Errorf("raylet component_rss_mb = %v, want 10 (10 MB)", got)
 	}
+	if got := rssBytesBy["raylet"].Value; got != 1.0e7 {
+		t.Errorf("raylet component_rss_bytes = %v, want 1.0e7 (bytes)", got)
+	}
 	if got := sharedBy["raylet"].Value; got != 2048 {
-		t.Errorf("raylet component_mem_shared_bytes = %v, want 2048 (bytes)", got)
+		t.Errorf("raylet component_shared_bytes = %v, want 2048 (bytes)", got)
+	}
+	if got := ussBytesBy["raylet"].Value; got != 8.0e6 {
+		t.Errorf("raylet component_uss_bytes = %v, want 8.0e6 (bytes)", got)
 	}
 	if got := ussBy["raylet"].Value; got != 8 {
 		t.Errorf("raylet component_uss_mb = %v, want 8", got)
-	}
-	if got := pssBy["raylet"].Value; got != 9 {
-		t.Errorf("raylet component_pss_mb = %v, want 9", got)
 	}
 	if got := fdsBy["gcs"].Value; got != 5 {
 		t.Errorf("gcs component_num_fds = %v, want 5", got)
@@ -363,8 +372,8 @@ func mapKeys(m map[string]gaugeRecord) []string {
 // on the head node, matching the Python `if self._is_head_node` guard.
 func TestComponentRecordsGCSOnlyOnHead(t *testing.T) {
 	head := recordsFor(t, metricRecordStats(), nil, true)
-	if got := componentRecordCount(head, gcsServerComponent); got != 6 {
-		t.Errorf("head gcs component records = %d, want 6", got)
+	if got := componentRecordCount(head, gcsServerComponent); got != 7 {
+		t.Errorf("head gcs component records = %d, want 7", got)
 	}
 	worker := recordsFor(t, metricRecordStats(), nil, false)
 	if got := componentRecordCount(worker, gcsServerComponent); got != 0 {
@@ -402,15 +411,15 @@ func TestComponentRecordsOmitUSSAndPSSWhenZero(t *testing.T) {
 	records := recordsFor(t, stats, nil, false)
 
 	// The component gauges that are always emitted must be present, so the test
-	// proves the USS/PSS absence is a guard rather than a missing fixture.
+	// proves the USS absence is a guard rather than a missing fixture.
 	if got := findRecords(records, ComponentGaugeRSSMB); len(got) != 1 {
 		t.Fatalf("component_rss_mb records = %d, want 1", len(got))
 	}
 	if got := findRecords(records, ComponentGaugeUSSMB); len(got) != 0 {
 		t.Errorf("component_uss_mb emitted for a zero USS total: %v", got)
 	}
-	if got := findRecords(records, ComponentGaugePSSMB); len(got) != 0 {
-		t.Errorf("component_pss_mb emitted for a zero PSS total: %v", got)
+	if got := findRecords(records, ComponentGaugeUSSBytes); len(got) != 0 {
+		t.Errorf("component_uss_bytes emitted for a zero USS total: %v", got)
 	}
 }
 
@@ -532,8 +541,8 @@ func TestStaleWorkerRecordsResetToZero(t *testing.T) {
 	assertTag(t, found[0], "Component", "ray::Gone")
 
 	for _, gauge := range []string{
-		ComponentGaugeMemSharedBytes, ComponentGaugeRSSMB,
-		ComponentGaugeUSSMB, ComponentGaugePSSMB, ComponentGaugeNumFDs,
+		ComponentGaugeSharedBytes, ComponentGaugeRSSMB, ComponentGaugeRSSBytes,
+		ComponentGaugeUSSMB, ComponentGaugeUSSBytes, ComponentGaugeNumFDs,
 	} {
 		reset := findRecords(records, gauge)
 		if len(reset) != 1 || reset[0].Value != 0 {
@@ -747,14 +756,19 @@ func TestToRecordsCoversAllRecordGauges(t *testing.T) {
 		GaugeClusterActiveNodes,
 		GaugeNodeCPUUtilization, GaugeNodeCPUCount,
 		GaugeNodeMemUsed, GaugeNodeMemAvailable, GaugeNodeMemTotal, GaugeNodeMemSharedBytes,
+		GaugeNodeMemUsedHost, GaugeNodeMemTotalHost,
+		GaugeNodeSwapUsed, GaugeNodeSwapTotal, GaugeNodeSwapUtilization,
+		GaugeNodeCgroupMemUsed, GaugeNodeCgroupMemTotal,
 		GaugeNodeGPUsAvailable, GaugeNodeGPUsUtilization, GaugeNodeGRAMUsed, GaugeNodeGRAMAvaliable,
+		GaugeNodeGPUPower, GaugeNodeGPUTemperature,
 		GaugeTpuTensorcoreUtilization, GaugeTpuMemoryBandwidth, GaugeTpuDutyCycle, GaugeTpuMemoryUsed, GaugeTpuMemoryTotal,
 		GaugeNodeDiskIORead, GaugeNodeDiskIOWrite, GaugeNodeDiskIOReadCount, GaugeNodeDiskIOWriteCount,
 		GaugeNodeDiskIOReadSpeed, GaugeNodeDiskIOWriteSpeed, GaugeNodeDiskReadIOPS, GaugeNodeDiskWriteIOPS,
 		GaugeNodeDiskUsage, GaugeNodeDiskFree, GaugeNodeDiskUtilizationPct,
 		GaugeNodeNetworkSent, GaugeNodeNetworkReceived, GaugeNodeNetworkSendSpeed, GaugeNodeNetworkReceiveSpeed,
-		ComponentGaugeCPUPercentage, ComponentGaugeMemSharedBytes, ComponentGaugeRSSMB,
-		ComponentGaugeUSSMB, ComponentGaugePSSMB, ComponentGaugeNumFDs,
+		ComponentGaugeCPUPercentage, ComponentGaugeSharedBytes,
+		ComponentGaugeRSSMB, ComponentGaugeRSSBytes,
+		ComponentGaugeUSSMB, ComponentGaugeUSSBytes, ComponentGaugeNumFDs,
 		ComponentGaugeGPUMemoryMB, ComponentGaugeGPUPercentage,
 	}
 	for _, name := range want {

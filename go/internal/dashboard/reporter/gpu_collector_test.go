@@ -142,7 +142,7 @@ func TestGPUCollectorSkipsShortRecords(t *testing.T) {
 // started interpolating external data there must fail this test.
 func TestGPUQueryArgsAreWhitelisted(t *testing.T) {
 	device := strings.Join(gpuQueryArgs, " ")
-	if device != "--query-gpu=index,uuid,name,utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits" {
+	if device != "--query-gpu=index,uuid,name,utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu --format=csv,noheader,nounits" {
 		t.Errorf("gpuQueryArgs = %q, want the fixed device query", device)
 	}
 	proc := strings.Join(gpuProcessQueryArgs, " ")
