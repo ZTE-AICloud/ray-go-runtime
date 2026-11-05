@@ -3,6 +3,8 @@ package reporter
 import (
 	"math"
 	"testing"
+
+	"github.com/ray-project/ray/go/internal/dashboard/agent"
 )
 
 type fakeSource struct {
@@ -377,4 +379,48 @@ func equalIntSlice(got interface{}, want []int) bool {
 		}
 	}
 	return true
+}
+
+// TestCgroupMemUsageCapsTotalAtHostMemory verifies the container memory total is
+// a usable number on a host whose cgroup is unconstrained. cgroup v1 writes a
+// near-int64 value for an unlimited limit and cgroup v2 writes "max"; reporting
+// either verbatim would make every used/total ratio on a dashboard zero or
+// infinite. Python caps the limit at the system total and falls back to it when
+// there is no usable limit, which is what this asserts.
+func TestCgroupMemUsageCapsTotalAtHostMemory(t *testing.T) {
+	src := newSystemSource(agent.Config{})
+	info, err := src.cgroupMemUsage()
+	if err != nil {
+		t.Skipf("no cgroup memory controller on this host: %v", err)
+	}
+	host, err := src.hostMemUsage()
+	if err != nil {
+		t.Skipf("cannot read host memory: %v", err)
+	}
+	if info.Total <= 0 {
+		t.Errorf("cgroupMemUsage total = %d, want a positive total", info.Total)
+	}
+	if info.Total > host.Total {
+		t.Errorf("cgroupMemUsage total = %d, want at most the host total %d", info.Total, host.Total)
+	}
+	if info.Used > info.Total {
+		t.Errorf("cgroupMemUsage used = %d exceeds total = %d", info.Used, info.Total)
+	}
+}
+
+// TestSwapUsageIsCgroupScopedOrAbsent verifies the swap figure never mixes a host
+// value into a cgroup-scoped result and never reports more used than total.
+func TestSwapUsageIsCgroupScopedOrAbsent(t *testing.T) {
+	t.Setenv(countSwapInMemoryMonitorEnvVar, "true")
+	src := newSystemSource(agent.Config{})
+	info, err := src.swapUsage()
+	if err != nil {
+		t.Fatalf("swapUsage: %v", err)
+	}
+	if info.Used < 0 || info.Used > info.Total {
+		t.Errorf("swap used = %d total = %d, want 0 <= used <= total", info.Used, info.Total)
+	}
+	if info.Total > 0 && (info.Percent < 0 || info.Percent > 100) {
+		t.Errorf("swap percent = %v, want 0..100", info.Percent)
+	}
 }

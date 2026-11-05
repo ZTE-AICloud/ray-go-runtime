@@ -710,6 +710,13 @@ const (
 	cgroupActiveV1   = "total_active_file"
 	cgroupInactiveV2 = "inactive_file"
 	cgroupActiveV2   = "active_file"
+
+	// cgroup v2 swap controller files and the v1 memsw controller, mirroring
+	// the paths get_cgroup_aware_swap_memory reads.
+	cgroupV2SwapMax         = "/sys/fs/cgroup/memory.swap.max"
+	cgroupV2SwapCurrentPath = "/sys/fs/cgroup/memory.swap.current"
+	cgroupV1MemswLimit      = "/sys/fs/cgroup/memory/memory.memsw.limit_in_bytes"
+	cgroupV1MemswUsage      = "/sys/fs/cgroup/memory/memory.memsw.usage_in_bytes"
 )
 
 // cgroupMemLimitBytes returns the cgroup memory limit in bytes, preferring
@@ -1727,12 +1734,7 @@ func (s *systemSource) swapUsage() (SwapInfo, error) {
 	if !envTrue(countSwapInMemoryMonitorEnvVar) {
 		return SwapInfo{}, errSwapDisabled
 	}
-	values, err := s.meminfo()
-	if err != nil {
-		return SwapInfo{}, err
-	}
-	total := values["SwapTotal"]
-	used := total - values["SwapFree"]
+	total, used := s.cgroupAwareSwap()
 	if used < 0 {
 		used = 0
 	}
@@ -1746,6 +1748,132 @@ func (s *systemSource) swapUsage() (SwapInfo, error) {
 	return SwapInfo{Total: total, Used: used, Percent: percent}, nil
 }
 
+// cgroupAwareSwap mirrors get_cgroup_aware_swap_memory: inside a container the
+// figures must be the cgroup's own swap, because host swap includes every other
+// workload on the machine; outside one they are the host's. The branches are
+// ordered the way Python orders them — cgroup v2 swap files first, then the
+// v1 memsw controller, then the host — and a cgroup branch that cannot be read
+// reports no swap rather than leaking a host figure into a cgroup-scoped one.
+func (s *systemSource) cgroupAwareSwap() (int64, int64) {
+	if total, used, ok := cgroupV2Swap(); ok {
+		return total, used
+	}
+	if total, used, ok := cgroupV1Swap(); ok {
+		return total, used
+	}
+	values, err := s.meminfo()
+	if err != nil {
+		return 0, 0
+	}
+	total := values["SwapTotal"]
+	return total, total - values["SwapFree"]
+}
+
+// cgroupV2Swap implements the cgroup v2 branch. A numeric memory.swap.max is the
+// cap; "max", a value that overflows int64, or a missing memory.swap.max means
+// the cgroup imposes no cap, so the host total stands in while used still comes
+// from this cgroup's memory.swap.current. A zero cap means swap is disabled for
+// the cgroup, and a read error reports no swap at all.
+func cgroupV2Swap() (int64, int64, bool) {
+	text, err := readProcFile(cgroupV2SwapMax)
+	if err != nil {
+		return 0, 0, false
+	}
+	raw := strings.TrimSpace(text)
+	max, parseErr := strconv.ParseInt(raw, 10, 64)
+	if parseErr != nil {
+		// Unlimited: the practical cap is whatever the host has. The used figure
+		// stays cgroup-scoped, so another workload's swap is never counted here.
+		hostTotal, _ := hostSwapFromMeminfo()
+		return hostTotal, readCgroupV2SwapCurrent(), true
+	}
+	if max == 0 {
+		// Swap disabled for this cgroup. Unlike the unlimited case, do not read
+		// memory.swap.current: a stale or transitioning value there is not swap
+		// this cgroup may use.
+		return 0, 0, true
+	}
+	return max, readCgroupV2SwapCurrent(), true
+}
+
+// cgroupV1Swap derives swap from the memsw controller, which counts RAM and
+// swap together: the swap cap is the combined limit minus the RAM limit, and
+// the used figure is the combined usage minus the RAM usage. An unset memsw
+// limit reads as a near-int64 sentinel, so the combined limit is capped at
+// host RAM + host swap the way the C++ memory monitor caps it.
+func cgroupV1Swap() (int64, int64, bool) {
+	memswLimit, ok := readCgroupInt64(cgroupV1MemswLimit)
+	if !ok {
+		return 0, 0, false
+	}
+	memswUsage, ok := readCgroupInt64(cgroupV1MemswUsage)
+	if !ok {
+		return 0, 0, false
+	}
+	hostRAM, _ := hostMemFromMeminfo()
+	if ramLimit, ok := readCgroupInt64(cgroupMemLimitV1); ok {
+		hostSwap, _ := hostSwapFromMeminfo()
+		memswLimit = minInt64(memswLimit, hostRAM+hostSwap)
+		used := int64(0)
+		if ramUsage, ok := readCgroupInt64(cgroupMemUsageV1); ok {
+			used = memswUsage - ramUsage
+			if used < 0 {
+				used = 0
+			}
+		}
+		return maxInt64(0, memswLimit-ramLimit), used, true
+	}
+	// Without a readable RAM limit the swap share cannot be derived from the
+	// combined counter, so there is no swap to report.
+	return 0, 0, true
+}
+
+// readCgroupV2SwapCurrent reads this cgroup's swap usage, treating a missing file
+// as zero, mirroring Python's _read_cgroup_v2_swap_current.
+func readCgroupV2SwapCurrent() int64 {
+	if v, ok := readCgroupInt64(cgroupV2SwapCurrentPath); ok {
+		return v
+	}
+	return 0
+}
+
+// hostSwapFromMeminfo returns the host swap total and used from /proc/meminfo.
+func hostSwapFromMeminfo() (int64, int64) {
+	values, err := readMeminfo()
+	if err != nil {
+		return 0, 0
+	}
+	total := values["SwapTotal"]
+	return total, total - values["SwapFree"]
+}
+
+// hostMemFromMeminfo returns the host physical memory total from /proc/meminfo.
+func hostMemFromMeminfo() (int64, int64) {
+	values, err := readMeminfo()
+	if err != nil {
+		return 0, 0
+	}
+	avail, ok := values["MemAvailable"]
+	if !ok || avail == 0 {
+		avail = values["MemFree"] + values["Cached"]
+	}
+	return values["MemTotal"], values["MemTotal"] - avail
+}
+
+func minInt64(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 // CgroupMemInfo is the container memory figure reported as node_cgroup_mem_*.
 type CgroupMemInfo struct {
 	Used  int64
@@ -1757,11 +1885,21 @@ type CgroupMemInfo struct {
 // memory controller has nothing to report, which is what the nil-able stat
 // entry expresses.
 func (s *systemSource) cgroupMemUsage() (CgroupMemInfo, error) {
+	values, err := s.meminfo()
+	if err != nil {
+		return CgroupMemInfo{}, err
+	}
 	used, haveUsed := cgroupUsedMemory()
 	limit, haveLimit := cgroupMemLimitBytes()
-	if !haveUsed && !haveLimit {
+	if !haveUsed {
 		return CgroupMemInfo{}, errNoCgroupMem
 	}
+	// Python get_cgroup_mem_stats reports min(limit, system_total) and falls
+	// back to system_total when there is no usable limit, so a host whose
+	// cgroup is unconstrained (cgroup v1 writes a near-int64 value, cgroup v2
+	// writes "max") reports the physical total instead of a sentinel that
+	// would make every used/total ratio zero or infinite.
+	limit = systemMemoryBytes(values, limit, haveLimit)
 	return CgroupMemInfo{Used: used, Total: limit}, nil
 }
 
