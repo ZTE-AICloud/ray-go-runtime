@@ -654,6 +654,10 @@ TEST(TaskSubmitterOperationsBuildActorOptionsTest, NodeAffinityTakesPrecedence) 
   ray::core::ActorCreationOptions built = ops.BuildActorOptions(options);
 
   ASSERT_TRUE(built.scheduling_strategy.has_node_affinity_scheduling_strategy());
+  const auto &na_strategy = built.scheduling_strategy.node_affinity_scheduling_strategy();
+  EXPECT_EQ(na_strategy.node_id(),
+            ray::NodeID::FromHex(options.node_affinity_node_id_hex).Binary());
+  EXPECT_FALSE(na_strategy.soft());
   EXPECT_FALSE(built.scheduling_strategy.has_placement_group_scheduling_strategy());
   EXPECT_FALSE(built.scheduling_strategy.has_default_scheduling_strategy());
 }
