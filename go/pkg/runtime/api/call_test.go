@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/ray-project/ray/go/pkg/ids"
+	"github.com/ray-project/ray/go/pkg/runtime/object"
 	"github.com/ray-project/ray/go/pkg/runtime/submitter"
 )
 
@@ -75,6 +76,46 @@ func TestTaskCaller_WithPlacementGroup(t *testing.T) {
 	}
 	if caller.options.PlacementGroup.BundleIndex != 2 {
 		t.Fatalf("options.PlacementGroup.BundleIndex = %d, want 2", caller.options.PlacementGroup.BundleIndex)
+	}
+}
+
+// TestWrapPythonArgsStampsCrossLanguageMetadata verifies that a value argument
+// routed through the Python wrapping path carries cross-language metadata so
+// the Python worker knows it must deserialize it as a cross-language value,
+// while the Go-native path keeps the Go metadata untouched.
+func TestWrapPythonArgsStampsCrossLanguageMetadata(t *testing.T) {
+	// The api test binary has no real serializer registered; the minimal test
+	// serializer mimics the Go metadata type for plain values.
+	object.SetSerializer(testSerializer{})
+
+	args := wrapPythonArgs([]interface{}{42})
+	if len(args) != 2 {
+		t.Fatalf("wrapPythonArgs returned %d args, want 2 (dummy marker + value)", len(args))
+	}
+
+	marker := args[0]
+	if !marker.IsPassByValue() || marker.Data == nil {
+		t.Fatal("dummy marker should be passed by value")
+	}
+	if got := string(marker.Data.Metadata); got != object.MetadataTypeRaw {
+		t.Errorf("dummy marker metadata = %q, want %q", got, object.MetadataTypeRaw)
+	}
+
+	value := args[1]
+	if !value.IsPassByValue() || value.Data == nil {
+		t.Fatal("wrapped python arg should be passed by value")
+	}
+	if got := string(value.Data.Metadata); got != object.MetadataTypeCrossLanguage {
+		t.Errorf("wrapped python arg metadata = %q, want %q", got, object.MetadataTypeCrossLanguage)
+	}
+
+	// The typed Go-native path must keep its own metadata type.
+	goArgs := convertArgs(42)
+	if len(goArgs) != 1 {
+		t.Fatalf("convertArgs returned %d args, want 1", len(goArgs))
+	}
+	if got := string(goArgs[0].Data.Metadata); got != object.MetadataTypeGo {
+		t.Errorf("go-native arg metadata = %q, want %q", got, object.MetadataTypeGo)
 	}
 }
 

@@ -763,7 +763,14 @@ func wrapPythonArgs(args []interface{}) []function.FunctionArg {
 	functionArgs := make([]function.FunctionArg, 0, len(args)*2)
 	for _, arg := range args {
 		functionArgs = append(functionArgs, function.NewFunctionArgByValue(pythonDummyType, pythonDummyRawMetadata))
-		functionArgs = append(functionArgs, convertArgToFunctionArg(arg))
+		fa := convertArgToFunctionArg(arg)
+		// Value arguments are deserialized by the Python worker through its
+		// cross-language path, which requires the XLANG metadata; the Go-native
+		// metadata would be rejected as an unknown serialization format.
+		if fa.IsPassByValue() && fa.Data != nil {
+			fa.Data.Metadata = []byte(object.MetadataTypeCrossLanguage)
+		}
+		functionArgs = append(functionArgs, fa)
 	}
 	return functionArgs
 }
