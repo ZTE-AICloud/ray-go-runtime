@@ -13,6 +13,7 @@ go_library(
     visibility = ["//go:__subpackages__"],
     deps = [
         "//go/internal/dashboard/head",
+        "//go/internal/dashboard/jobutil",
         "//go/pkg/log",
         "//go/pkg/version",
         "//go/proto",
