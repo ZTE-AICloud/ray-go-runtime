@@ -169,8 +169,16 @@ type GCSClient struct {
 	pg         proto.PlacementGroupInfoGcsServiceClient
 	task       proto.TaskInfoGcsServiceClient
 	kv         proto.InternalKVGcsServiceClient
-	pubsub     proto.InternalPubSubGcsServiceClient
-	runtimeEnv proto.RuntimeEnvGcsServiceClient
+	// The GCS server registers pubsub RPCs on two services, and a channel is
+	// served by exactly one of them: ControlPlanePubSubGcsService for the
+	// node/actor/job channels, ObservabilityPubSubService for the log, error
+	// and node-resource-usage channels (python/ray/_private/gcs_pubsub.py
+	// selects between them the same way). InternalPubSubGcsService exists only
+	// in the proto and is never registered, so subscribing through it fails
+	// with Unimplemented.
+	controlPlanePubSub  proto.ControlPlanePubSubGcsServiceClient
+	observabilityPubSub proto.ObservabilityPubSubServiceClient
+	runtimeEnv          proto.RuntimeEnvGcsServiceClient
 }
 
 // NewGCSClient establishes a connection to the GCS at address and initializes
@@ -203,7 +211,8 @@ func NewGCSClient(ctx context.Context, address string, opts ...GRPCOption) (*GCS
 		pg:         proto.NewPlacementGroupInfoGcsServiceClient(conn),
 		task:       proto.NewTaskInfoGcsServiceClient(conn),
 		kv:         proto.NewInternalKVGcsServiceClient(conn),
-		pubsub:     proto.NewInternalPubSubGcsServiceClient(conn),
+		controlPlanePubSub:  proto.NewControlPlanePubSubGcsServiceClient(conn),
+		observabilityPubSub: proto.NewObservabilityPubSubServiceClient(conn),
 		runtimeEnv: proto.NewRuntimeEnvGcsServiceClient(conn),
 	}, nil
 }
@@ -272,10 +281,30 @@ func (c *GCSClient) GetTaskEvents(ctx context.Context, req *proto.GetTaskEventsR
 	return c.task.GetTaskEvents(c.withClusterID(ctx), req)
 }
 
-// PubSub returns the GCS internal pubsub service client, used by the
-// long-polling subscribers (go/internal/dashboard/head/pubsub.go).
-func (c *GCSClient) PubSub() proto.InternalPubSubGcsServiceClient {
-	return c.pubsub
+// pubSubClient is the subset of the two pubsub services the subscribers use.
+// Both services expose these RPCs with identical signatures; only the service
+// a channel is registered on differs.
+type pubSubClient interface {
+	GcsSubscriberPoll(ctx context.Context, in *proto.GcsSubscriberPollRequest, opts ...grpc.CallOption) (*proto.GcsSubscriberPollReply, error)
+	GcsSubscriberCommandBatch(ctx context.Context, in *proto.GcsSubscriberCommandBatchRequest, opts ...grpc.CallOption) (*proto.GcsSubscriberCommandBatchReply, error)
+}
+
+// observabilityPubSubChannels mirrors Python's _OBSERVABILITY_PUBSUB_CHANNELS:
+// the channels served by ObservabilityPubSubService. Everything else is served
+// by ControlPlanePubSubGcsService.
+var observabilityPubSubChannels = map[proto.ChannelType]bool{
+	proto.ChannelType_RAY_ERROR_INFO_CHANNEL:          true,
+	proto.ChannelType_RAY_LOG_CHANNEL:                 true,
+	proto.ChannelType_RAY_NODE_RESOURCE_USAGE_CHANNEL: true,
+}
+
+// PubSubFor returns the pubsub service client that serves channel. Subscribing
+// on the wrong one fails with Unimplemented.
+func (c *GCSClient) PubSubFor(channel proto.ChannelType) pubSubClient {
+	if observabilityPubSubChannels[channel] {
+		return c.observabilityPubSub
+	}
+	return c.controlPlanePubSub
 }
 
 // RuntimeEnv returns the GCS runtime env service client, used to pin
