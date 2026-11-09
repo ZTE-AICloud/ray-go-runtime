@@ -353,8 +353,10 @@ func TestLocalModeActorTask_ConcurrencyGroupMaxCallsFallback(t *testing.T) {
 // TestLocalModeActorTask_MaxConcurrencyDefaults verifies that an unset
 // MaxConcurrency resolves like the native (cgo) backend: 1000 for an async
 // actor (Python's DEFAULT_MAX_CONCURRENCY_ASYNC, so async methods can
-// interleave on the event loop) and 1 (serialized) for a synchronous actor. An
-// explicit positive value is left untouched.
+// interleave on the event loop) and 1 (serialized) for a synchronous actor.
+// -1 (unlimited) also collapses to that numeric default because the
+// concurrency-group manager cannot represent unlimited. An explicit positive
+// value is left untouched.
 func TestLocalModeActorTask_MaxConcurrencyDefaults(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -364,6 +366,8 @@ func TestLocalModeActorTask_MaxConcurrencyDefaults(t *testing.T) {
 	}{
 		{"AsyncUnsetDefaultsToAsyncDefault", true, 0, 1000},
 		{"SyncUnsetDefaultsToSerialized", false, 0, 1},
+		{"AsyncUnlimited", true, -1, 1000},
+		{"SyncUnlimited", false, -1, 1},
 		{"AsyncExplicitValueUnchanged", true, 4, 4},
 	}
 	for _, tc := range tests {

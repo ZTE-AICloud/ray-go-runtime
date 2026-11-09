@@ -507,11 +507,13 @@ func convertActorCreationOptionsToC(opts *submitter.ActorCreationOptions, actorD
 	if len(actorDesc) >= 3 {
 		prefix[0], prefix[1], prefix[2] = actorDesc[0], actorDesc[1], actorDesc[2]
 	}
-	// MaxCalls <= 0 (0 or -1) resolves to the actor's effective max_concurrency,
-	// mirroring local_mode's CreateActor (task_submitter.go) so cluster and local
-	// behave identically. A non-positive actor max_concurrency falls back to 1
-	// (serialized); a concurrency group has no "unlimited" mode (its C++
-	// max_concurrency is a positive uint32), matching Java.
+	// MaxCalls <= 0 (0 or -1) resolves to the actor's effective max_concurrency.
+	// A non-positive actor max_concurrency falls back to 1 (serialized); a
+	// concurrency group has no "unlimited" mode (its C++ max_concurrency is a
+	// positive uint32), matching Java. This deliberately diverges from
+	// local_mode's CreateActor (task_submitter.go) for an async actor with an
+	// unset max_concurrency: local mode resolves that actor to 1000, while this
+	// group fallback stays 1, kept identical to the reference implementation.
 	groupMaxCallsFallback := 1
 	if opts.MaxConcurrency > 0 {
 		groupMaxCallsFallback = opts.MaxConcurrency
