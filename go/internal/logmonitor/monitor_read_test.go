@@ -19,6 +19,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func appendLog(t *testing.T, path, contents string) {
@@ -359,5 +360,50 @@ func TestCheckLogFilesAndPublishUpdatesSkipsPositionUpdateAfterFailedReopen(t *t
 	}
 	if info.filePosition < 0 {
 		t.Fatalf("filePosition = %d, want a non-negative position", info.filePosition)
+	}
+}
+
+func TestCheckLogFilesAndPublishUpdatesReplacesInvalidUTF8(t *testing.T) {
+	logsDir := t.TempDir()
+	publisher := &recordingPublisher{}
+	logPath := createLogFile(t, logsDir, "worker-6df6d5dd-01000000-47660.out", "")
+
+	m, err := New("127.0.0.1", logsDir, publisher)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	m.maxLineSize = 8
+	m.numLinesToRead = 10
+
+	// Two ordinary ways to produce invalid UTF-8. The first line is cut by
+	// the byte-level cap in the middle of a three-byte character, so its tail
+	// is a broken sequence. The second is an EOF half-line carrying a lone
+	// continuation byte, as a worker writing a multi-byte character in two
+	// writes would leave behind.
+	appendLog(t, logPath, strings.Repeat("日", 10)+"\nraw \xff tail")
+
+	if err := m.updateLogFilenames(); err != nil {
+		t.Fatalf("updateLogFilenames() error = %v", err)
+	}
+	if err := m.openClosedFiles(); err != nil {
+		t.Fatalf("openClosedFiles() error = %v", err)
+	}
+	if _, err := m.checkLogFilesAndPublishUpdates(); err != nil {
+		t.Fatalf("checkLogFilesAndPublishUpdates() error = %v", err)
+	}
+
+	if len(publisher.batches) != 1 || len(publisher.batches[0].Lines) != 2 {
+		t.Fatalf("batches = %#v, want one batch with two lines", publisher.batches)
+	}
+	for i, line := range publisher.batches[0].Lines {
+		if !utf8.ValidString(line) {
+			t.Fatalf("line %d = %q is not valid UTF-8; proto marshal would reject the whole batch", i, line)
+		}
+	}
+	if !strings.Contains(publisher.batches[0].Lines[0], "�") {
+		t.Fatalf("truncated line = %q, want a replacement character", publisher.batches[0].Lines[0])
+	}
+	if !strings.Contains(publisher.batches[0].Lines[1], "�") {
+		t.Fatalf("half-line = %q, want a replacement character", publisher.batches[0].Lines[1])
 	}
 }

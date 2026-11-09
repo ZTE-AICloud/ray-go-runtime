@@ -390,7 +390,15 @@ func (m *Monitor) checkLogFilesAndPublishUpdates() (bool, error) {
 			if truncated {
 				truncatedLines++
 			}
-			line := strings.TrimRight(rawLine, "\r\n")
+			// Replace invalid UTF-8 the way the Python monitor's
+			// decode("utf-8", "replace") does. Without this the raw bytes
+			// reach proto.LogBatch.Lines, whose proto3 marshal rejects
+			// invalid UTF-8 — and one bad byte would fail the whole batch
+			// (up to maxBatchBytes), not just its own line. Two ordinary
+			// ways to produce one: a truncated line cut mid-character by
+			// the byte-level cap, and a worker writing a partial multi-byte
+			// character at the end of the file.
+			line := strings.ToValidUTF8(strings.TrimRight(rawLine, "\r\n"), "�")
 			switch {
 			case strings.HasPrefix(line, logPrefixActorName):
 				if err := flush(); err != nil {
