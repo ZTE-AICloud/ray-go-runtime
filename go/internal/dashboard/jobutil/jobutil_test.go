@@ -7,9 +7,17 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// The constants-drift guard against the agent job module lands with the job
-// module itself; it asserts RayInternalNamespacePrefix and JobIDMetadataKey
-// stay equal to the agent-side constants.
+// TestConstantsDriftGuard pins the two exported constants to the Python values
+// they mirror: RAY_INTERNAL_NAMESPACE_PREFIX and JOB_ID_METADATA_KEY from
+// python/ray/dashboard/modules/job/common.py. The dashboard agent job module
+// (go/internal/dashboard/agent/job) composes its internal KV keys from these
+// constants, so a change here silently rewrites the cross-language key layout.
+// The agent-side TestJobutilConstantsDriftGuard asserts the same values from
+// the consuming side.
+func TestConstantsDriftGuard(t *testing.T) {
+	assert.Equal(t, "_ray_internal_", RayInternalNamespacePrefix)
+	assert.Equal(t, "job_submission_id", JobIDMetadataKey)
+}
 
 func TestPtrString(t *testing.T) {
 	assert.Equal(t, "x", *PtrString("x"))
@@ -33,6 +41,19 @@ func TestRuntimeEnvSerialized(t *testing.T) {
 		},
 	}
 	assert.Equal(t, `{"a":1}`, RuntimeEnvSerialized(entry))
+
+	// A missing job config, a missing runtime env info, and an empty serialized
+	// env all yield the empty string.
+	assert.Equal(t, "", RuntimeEnvSerialized(&proto.JobTableData{}))
+	assert.Equal(t, "", RuntimeEnvSerialized(&proto.JobTableData{Config: &proto.JobConfig{}}))
+	assert.Equal(t, "", RuntimeEnvSerialized(&proto.JobTableData{
+		Config: &proto.JobConfig{RuntimeEnvInfo: &proto.RuntimeEnvInfo{}},
+	}))
+
+	// The entry itself must be non-nil: every caller passes a row returned by a
+	// job listing, so the helper keeps the non-nil contract of the Python
+	// counterpart instead of silently accepting nil.
+	assert.Panics(t, func() { RuntimeEnvSerialized(nil) })
 }
 
 func TestRuntimeEnvFromJSON(t *testing.T) {

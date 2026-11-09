@@ -38,7 +38,8 @@ func RuntimeEnvToDict(serialized string) map[string]interface{} {
 }
 
 // RuntimeEnvSerialized extracts the serialized runtime env from the job
-// config, handling a nil RuntimeEnvInfo.
+// config, handling a nil RuntimeEnvInfo. The entry itself must be non-nil: it
+// is always a row returned by a job listing.
 func RuntimeEnvSerialized(entry *proto.JobTableData) string {
 	if entry.Config == nil || entry.Config.RuntimeEnvInfo == nil {
 		return ""

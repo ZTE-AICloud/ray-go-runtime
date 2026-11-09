@@ -1,0 +1,39 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "job",
+    srcs = [
+        "common.go",
+        "job_events.go",
+        "job_log_storage_client.go",
+        "job_utils.go",
+    ],
+    importpath = "github.com/ray-project/ray/go/internal/dashboard/agent/job",
+    visibility = ["//go:__subpackages__"],
+    deps = [
+        "//go/internal/dashboard/jobutil",
+        "//go/internal/event",
+        "//go/pkg/gcs",
+        "//go/pkg/log",
+        "//go/proto",
+    ],
+)
+
+go_test(
+    name = "job_test",
+    srcs = [
+        "common_test.go",
+        "fake_gcs_test.go",
+        "job_log_storage_client_test.go",
+        "job_utils_test.go",
+    ],
+    embed = [":job"],
+    deps = [
+        "//go/internal/dashboard/jobutil",
+        "//go/pkg/gcs",
+        "//go/pkg/ids",
+        "//go/proto",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)
