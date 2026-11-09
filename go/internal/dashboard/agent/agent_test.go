@@ -917,6 +917,48 @@ func TestAgentHTTPMethodNotAllowedMatchesAiohttp(t *testing.T) {
 	}
 }
 
+// TestAgentHTTPHealthzMethodNotAllowedMatchesAiohttp verifies the method-scoped
+// health routes still surface aiohttp's 405 envelope through the router: a POST
+// matches no method, so the router answers instead of routing to the handler.
+func TestAgentHTTPHealthzMethodNotAllowedMatchesAiohttp(t *testing.T) {
+	rec := doRequest(t, newTestRouter(t, healthRouteModule()), http.MethodPost, "http://agent/api/healthz", nil)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /api/healthz = %d, want 405", rec.Code)
+	}
+	if got, want := rec.Header().Get("Allow"), "GET,HEAD,OPTIONS"; got != want {
+		t.Errorf("Allow = %q, want %q", got, want)
+	}
+	if got := rec.Body.String(); got != "405: Method Not Allowed" {
+		t.Errorf("body = %q, want the aiohttp 405 text", got)
+	}
+}
+
+// TestAgentHTTPTrailingSlashNotRedirected verifies the router does not leak
+// ServeMux's 301 redirect when a request matches a trailing-slash pattern only.
+// aiohttp answers the request itself (or 404s), it never redirects.
+func TestAgentHTTPTrailingSlashNotRedirected(t *testing.T) {
+	ok := func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }
+	mod := &routeModule{register: func(mux *http.ServeMux) { mux.HandleFunc("GET /dir/", ok) }}
+	rt := newTestRouter(t, mod)
+
+	for _, target := range []string{"http://agent/dir/", "http://agent/dir/x"} {
+		if rec := doRequest(t, rt, http.MethodGet, target, nil); rec.Code != http.StatusOK {
+			t.Errorf("GET %s = %d, want 200", target, rec.Code)
+		}
+	}
+
+	rec := doRequest(t, rt, http.MethodGet, "http://agent/dir", nil)
+	if rec.Code == http.StatusMovedPermanently {
+		t.Fatalf("GET /dir = 301, want no redirect")
+	}
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("GET /dir = %d, want 404", rec.Code)
+	}
+	if got := rec.Header().Get("Location"); got != "" {
+		t.Errorf("Location = %q, want no redirect", got)
+	}
+}
+
 // TestAgentHTTPPathEscapingMatchesAiohttp verifies paths with empty segments or
 // dot segments are not silently normalized the way net/http's ServeMux would
 // (a 301 redirect) and instead fall through to aiohttp's 404, matching

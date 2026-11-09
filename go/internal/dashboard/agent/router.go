@@ -66,10 +66,33 @@ func (rt *aiohttpRouter) probe(r *http.Request) *http.Request {
 		clone.URL = &raw
 		probe = &clone
 	}
-	if h, pattern := rt.mux.Handler(probe); pattern == "" || h == nil {
+	h, pattern := rt.mux.Handler(probe)
+	if pattern == "" || h == nil {
+		return nil
+	}
+	// ServeMux answers a request for "/dir" when only "/dir/" is registered
+	// with a 301 redirect to "/dir/". aiohttp serves the path or 404s, so
+	// treat the generated redirect as no match and let 405/404 semantics
+	// take over.
+	if rt.isTrailingSlashRedirect(pattern, probe) {
 		return nil
 	}
 	return probe
+}
+
+// isTrailingSlashRedirect reports whether pattern names the redirect target
+// ServeMux generates for a request whose path only matches a trailing-slash
+// pattern. Subtree matches ("GET /logs/" for "/logs/a.log") are not redirects
+// and must keep routing normally.
+func (rt *aiohttpRouter) isTrailingSlashRedirect(pattern string, r *http.Request) bool {
+	if i := strings.IndexByte(pattern, ' '); i >= 0 {
+		pattern = pattern[i+1:]
+	}
+	if !strings.HasSuffix(pattern, "/") {
+		return false
+	}
+	path := r.URL.EscapedPath()
+	return !strings.HasSuffix(path, "/") && path+"/" == pattern
 }
 
 // serves reports whether any method routes the request's path.

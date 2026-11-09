@@ -16,8 +16,11 @@ package log
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -76,4 +79,103 @@ func inside(base, path string) bool {
 		return false
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && rel != ""
+}
+
+// globLogFiles returns the paths under logDir matching a pathlib-style glob.
+// A "**" segment spans directories recursively, which filepath.Glob cannot
+// express; this is what LogAgentV1Grpc.ListLogs globs with in Python. Absolute
+// patterns are unsupported, matching pathlib's NotImplementedError.
+func globLogFiles(logDir, pattern string) ([]string, error) {
+	if filepath.IsAbs(pattern) {
+		return nil, fmt.Errorf("Non-relative patterns are unsupported")
+	}
+	re, err := globToRegex(pattern)
+	if err != nil {
+		return nil, err
+	}
+	var matches []string
+	walkErr := filepath.WalkDir(logDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || p == logDir {
+			return nil
+		}
+		rel, rerr := filepath.Rel(logDir, p)
+		if rerr != nil {
+			return nil
+		}
+		if re.MatchString(filepath.ToSlash(rel)) {
+			matches = append(matches, p)
+		}
+		return nil
+	})
+	if walkErr != nil {
+		return nil, walkErr
+	}
+	sort.Strings(matches)
+	return matches, nil
+}
+
+// globToRegex translates a "/"-separated glob into a regular expression.
+// A "**" segment matches across directory levels, including zero levels when
+// it is followed by more segments.
+func globToRegex(pattern string) (*regexp.Regexp, error) {
+	segments := strings.Split(pattern, "/")
+	var b strings.Builder
+	b.WriteString("^")
+	for i, seg := range segments {
+		if i > 0 && segments[i-1] != "**" {
+			b.WriteString("/")
+		}
+		if seg == "**" {
+			if i == len(segments)-1 {
+				b.WriteString(".*")
+			} else {
+				b.WriteString("(?:.*/)?")
+			}
+			continue
+		}
+		b.WriteString(fnmatchSegmentToRegex(seg))
+	}
+	b.WriteString("$")
+	return regexp.Compile(b.String())
+}
+
+// fnmatchSegmentToRegex translates one glob segment with fnmatch's character
+// class and wildcard semantics; "*" and "?" never match "/".
+func fnmatchSegmentToRegex(seg string) string {
+	var b strings.Builder
+	for i := 0; i < len(seg); i++ {
+		c := seg[i]
+		switch c {
+		case '*':
+			b.WriteString("[^/]*")
+		case '?':
+			b.WriteString("[^/]")
+		case '[':
+			j := i + 1
+			if j < len(seg) && (seg[j] == '!' || seg[j] == '^') {
+				j++
+			}
+			if j < len(seg) && seg[j] == ']' {
+				j++
+			}
+			start := j
+			for j < len(seg) && seg[j] != ']' {
+				j++
+			}
+			if j >= len(seg) {
+				// fnmatch treats an unterminated "[" as a literal bracket.
+				b.WriteString(regexp.QuoteMeta("["))
+				continue
+			}
+			cls := seg[start:j]
+			if strings.HasPrefix(cls, "!") {
+				cls = "^" + cls[1:]
+			}
+			b.WriteString("[" + cls + "]")
+			i = j
+		default:
+			b.WriteString(regexp.QuoteMeta(string(c)))
+		}
+	}
+	return b.String()
 }
