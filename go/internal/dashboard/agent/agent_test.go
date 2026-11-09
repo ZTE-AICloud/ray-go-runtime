@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -27,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ray-project/ray/go/internal/common"
 	"github.com/ray-project/ray/go/pkg/gcs"
 	"github.com/ray-project/ray/go/pkg/ids"
 	"github.com/ray-project/ray/go/proto"
@@ -111,19 +113,34 @@ func TestRunStartsAllModules(t *testing.T) {
 	}
 }
 
-// TestNewHTTPServerBindsBeforeServe verifies the listen socket is bound by the
-// constructor (so it accepts connections before the agent publishes its address
-// in GCS) and that it is reachable both from localhost (the in-container
-// readiness probe) and from this host's non-loopback address (head-side
-// consumers dialing the pod IP resolved through ports_by_node).
+// TestNewHTTPServerBindsBeforeServe verifies the listen sockets are bound by the
+// constructor (so they accept connections before the agent publishes its
+// address in GCS) and that both the node-ip listener (head-side consumers dial
+// the pod IP resolved through ports_by_node) and the loopback listener (the
+// in-container readiness probe) accept connections before Serve is called.
 func TestNewHTTPServerBindsBeforeServe(t *testing.T) {
-	httpSrv, err := newHTTPServer(Config{NodeIP: "127.0.0.1", ListenPort: 0}, []Module{&stubModule{}})
+	// The node IP must be an address assigned to this host, and non-loopback so
+	// the loopback listener is created. 127.0.0.2 is a loopback-device address
+	// that IsLocalhost does not treat as localhost, so it works even on hosts
+	// without a routable non-loopback IPv4.
+	nodeIP := nonLoopbackIPv4(t)
+	if nodeIP == "" {
+		nodeIP = "127.0.0.2"
+	}
+	httpSrv, err := newHTTPServer(Config{NodeIP: nodeIP, ListenPort: 0}, []Module{&stubModule{}})
 	if err != nil {
 		t.Fatalf("newHTTPServer: %v", err)
 	}
+	defer func() {
+		_ = httpSrv.shutdown(context.Background())
+		_ = httpSrv.listener.Close()
+	}()
 	port := listenerPort(httpSrv.listener)
 	if port <= 0 {
 		t.Fatalf("listener port = %d, want a bound ephemeral port", port)
+	}
+	if got := httpSrv.listener.Addr().(*net.TCPAddr).IP.String(); got != nodeIP {
+		t.Errorf("node-ip listener bound %s, want %s", got, nodeIP)
 	}
 	dialBeforeServe := func(addr string) {
 		t.Helper()
@@ -134,10 +151,11 @@ func TestNewHTTPServerBindsBeforeServe(t *testing.T) {
 		}
 		conn.Close()
 	}
-	dialBeforeServe(fmt.Sprintf("localhost:%d", port))
-	if ip := nonLoopbackIPv4(t); ip != "" {
-		dialBeforeServe(fmt.Sprintf("%s:%d", ip, port))
+	dialBeforeServe(fmt.Sprintf("%s:%d", nodeIP, port))
+	if httpSrv.loopbackListener == nil {
+		t.Fatalf("no loopback listener bound for the non-local node IP %s", nodeIP)
 	}
+	dialBeforeServe(httpSrv.loopbackListener.Addr().String())
 }
 
 // nonLoopbackIPv4 returns this host's first non-loopback IPv4 address, or ""
@@ -699,6 +717,301 @@ func TestRunReleasesHTTPServerWhenGRPCServerFails(t *testing.T) {
 	if dialErr == nil {
 		conn.Close()
 		t.Fatalf("HTTP port %d still accepting connections after Run failed", httpPort)
+	}
+}
+
+// routeModule is a Module that registers HTTP routes supplied by a test.
+type routeModule struct {
+	register func(*http.ServeMux)
+}
+
+func (m *routeModule) Start(context.Context) error { return nil }
+
+func (m *routeModule) RegisterHTTP(mux *http.ServeMux) error {
+	if m.register != nil {
+		m.register(mux)
+	}
+	return nil
+}
+
+func (m *routeModule) RegisterGRPC(*grpc.Server) error { return nil }
+
+// healthRouteModule registers the two public agent health endpoints plus a
+// private endpoint, so middleware and router semantics can be observed.
+func healthRouteModule() *routeModule {
+	return &routeModule{register: func(mux *http.ServeMux) {
+		ok := func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }
+		mux.HandleFunc("GET /api/healthz", ok)
+		mux.HandleFunc("GET /api/local_raylet_healthz", ok)
+		mux.HandleFunc("GET /api/jobs", ok)
+	}}
+}
+
+// newTestRouter builds the aiohttp-compatible router directly, bypassing the
+// auth and browser middleware so the router semantics can be observed in
+// isolation.
+func newTestRouter(t *testing.T, mods ...Module) *aiohttpRouter {
+	t.Helper()
+	mux := http.NewServeMux()
+	for _, m := range mods {
+		if err := m.RegisterHTTP(mux); err != nil {
+			t.Fatalf("register HTTP routes: %v", err)
+		}
+	}
+	return &aiohttpRouter{mux: mux}
+}
+
+// newAgentHandler builds the production handler chain (max-bytes, browser
+// block, token auth, CORS) for the given modules.
+func newAgentHandler(t *testing.T, mods ...Module) http.Handler {
+	t.Helper()
+	srv, err := newHTTPServer(Config{NodeIP: "127.0.0.1"}, mods)
+	if err != nil {
+		t.Fatalf("newHTTPServer: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = srv.shutdown(context.Background())
+		_ = srv.listener.Close()
+	})
+	return srv.server.Handler
+}
+
+// doRequest serves one request through h and returns the recorded response.
+func doRequest(t *testing.T, h http.Handler, method, target string, header map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, target, nil)
+	for k, v := range header {
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestAgentHTTPRequiresTokenOutsidePublicPaths verifies the token-auth
+// middleware the agent shares with the head: the health endpoints stay public,
+// every other path requires a bearer token when RAY_AUTH_MODE=token, and an
+// unknown path is authenticated before it is routed (auth answers 401, not the
+// router's 404), mirroring the Python agent's middleware order.
+func TestAgentHTTPRequiresTokenOutsidePublicPaths(t *testing.T) {
+	t.Setenv("RAY_AUTH_MODE", "token")
+	t.Setenv("RAY_AUTH_TOKEN", "test-token")
+	h := newAgentHandler(t, healthRouteModule())
+
+	for _, path := range []string{"/api/healthz", "/api/local_raylet_healthz"} {
+		rec := doRequest(t, h, http.MethodGet, "http://agent"+path, nil)
+		if rec.Code != http.StatusOK {
+			t.Errorf("GET %s without a token = %d, want 200 (public path)", path, rec.Code)
+		}
+	}
+
+	cases := []struct {
+		name     string
+		path     string
+		auth     string
+		wantCode int
+		wantBody string
+	}{
+		{"missing token", "/api/jobs", "", http.StatusUnauthorized, "Unauthorized: Missing authentication token"},
+		{"invalid token", "/api/jobs", "Bearer wrong", http.StatusForbidden, "Forbidden: Invalid authentication token"},
+		{"valid token", "/api/jobs", "Bearer test-token", http.StatusOK, ""},
+		{"unknown path is authenticated first", "/api/unknown", "", http.StatusUnauthorized, "Unauthorized: Missing authentication token"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			header := map[string]string{}
+			if tc.auth != "" {
+				header["Authorization"] = tc.auth
+			}
+			rec := doRequest(t, h, http.MethodGet, "http://agent"+tc.path, header)
+			if rec.Code != tc.wantCode {
+				t.Fatalf("GET %s = %d, want %d", tc.path, rec.Code, tc.wantCode)
+			}
+			if got := rec.Body.String(); got != tc.wantBody {
+				t.Errorf("body = %q, want %q", got, tc.wantBody)
+			}
+		})
+	}
+}
+
+// TestAgentHTTPPreflightMatchesAiohttpCORS verifies the router answers CORS
+// preflights only for registered routes, with the aiohttp_cors headers, and
+// that the production chain still rejects browser-origin traffic (the agent's
+// browser-block middleware runs before the router, as in the Python agent).
+func TestAgentHTTPPreflightMatchesAiohttpCORS(t *testing.T) {
+	mod := healthRouteModule()
+
+	t.Run("registered route", func(t *testing.T) {
+		rec := doRequest(t, newTestRouter(t, mod), http.MethodOptions, "http://agent/api/jobs", map[string]string{
+			"Origin":                        "http://dashboard",
+			"Access-Control-Request-Method": http.MethodGet,
+		})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("preflight = %d, want 200", rec.Code)
+		}
+		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "http://dashboard" {
+			t.Errorf("Access-Control-Allow-Origin = %q, want the request origin", got)
+		}
+		if got := rec.Header().Get("Access-Control-Allow-Methods"); got != http.MethodGet {
+			t.Errorf("Access-Control-Allow-Methods = %q, want GET", got)
+		}
+		if got := rec.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+			t.Errorf("Access-Control-Allow-Credentials = %q, want true", got)
+		}
+	})
+
+	t.Run("unregistered route", func(t *testing.T) {
+		rec := doRequest(t, newTestRouter(t, mod), http.MethodOptions, "http://agent/api/unknown", map[string]string{
+			"Origin":                        "http://dashboard",
+			"Access-Control-Request-Method": http.MethodGet,
+		})
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("preflight on an unregistered route = %d, want 404", rec.Code)
+		}
+		if got := rec.Body.String(); got != "404: Not Found" {
+			t.Errorf("body = %q, want the aiohttp 404 text", got)
+		}
+	})
+
+	t.Run("browser origin is blocked by the chain", func(t *testing.T) {
+		t.Setenv("RAY_AUTH_MODE", "")
+		rec := doRequest(t, newAgentHandler(t, mod), http.MethodGet, "http://agent/api/jobs", map[string]string{
+			"Origin": "http://dashboard",
+		})
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("browser request = %d, want 403", rec.Code)
+		}
+		if got := rec.Body.String(); got != "Browser requests not allowed." {
+			t.Errorf("body = %q, want the browser-block text", got)
+		}
+	})
+}
+
+// TestAgentHTTPMethodNotAllowedMatchesAiohttp verifies an unregistered method
+// on a registered path produces aiohttp's 405 body and an Allow header listing
+// the methods the mux actually serves (plus OPTIONS).
+func TestAgentHTTPMethodNotAllowedMatchesAiohttp(t *testing.T) {
+	rec := doRequest(t, newTestRouter(t, healthRouteModule()), http.MethodPut, "http://agent/api/jobs", nil)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("PUT /api/jobs = %d, want 405", rec.Code)
+	}
+	if got, want := rec.Header().Get("Allow"), "GET,HEAD,OPTIONS"; got != want {
+		t.Errorf("Allow = %q, want %q", got, want)
+	}
+	if got := rec.Body.String(); got != "405: Method Not Allowed" {
+		t.Errorf("body = %q, want the aiohttp 405 text", got)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "text/plain; charset=utf-8" {
+		t.Errorf("Content-Type = %q, want text/plain; charset=utf-8", got)
+	}
+}
+
+// TestAgentHTTPPathEscapingMatchesAiohttp verifies paths with empty segments or
+// dot segments are not silently normalized the way net/http's ServeMux would
+// (a 301 redirect) and instead fall through to aiohttp's 404, matching
+// aiohttp's router, which matches the request path literally.
+func TestAgentHTTPPathEscapingMatchesAiohttp(t *testing.T) {
+	rt := newTestRouter(t, healthRouteModule())
+
+	if rec := doRequest(t, rt, http.MethodGet, "http://agent/api/jobs", nil); rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/jobs = %d, want 200", rec.Code)
+	}
+
+	for _, target := range []string{
+		"http://agent//api/jobs",
+		"http://agent/api/./jobs",
+		"http://agent/api/../api/jobs",
+	} {
+		rec := doRequest(t, rt, http.MethodGet, target, nil)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("GET %s = %d, want 404 (aiohttp matches the path literally)", target, rec.Code)
+		}
+		if got := rec.Header().Get("Location"); got != "" {
+			t.Errorf("GET %s redirected to %q, want no redirect", target, got)
+		}
+		if got := rec.Body.String(); got != "404: Not Found" {
+			t.Errorf("GET %s body = %q, want the aiohttp 404 text", target, got)
+		}
+	}
+
+	// The method probe escapes the same way: a method mismatch on a path that
+	// does not exist is a 404, not a 405 with an Allow header.
+	if rec := doRequest(t, rt, http.MethodPut, "http://agent//api/jobs", nil); rec.Code != http.StatusNotFound {
+		t.Errorf("PUT //api/jobs = %d, want 404", rec.Code)
+	}
+}
+
+// TestHTTPServerLoopbackListener verifies the agent binds a second listener on
+// the localhost address when the node IP is not a loopback address (the
+// in-container readiness probe dials localhost), that both listeners serve the
+// same handler, and that shutdown releases both. The listen port is injected as
+// 0, so the loopback listener is expected to share the node-ip listener's
+// actually bound port rather than the configured 0.
+func TestHTTPServerLoopbackListener(t *testing.T) {
+	t.Setenv("RAY_AUTH_MODE", "")
+	srv, err := newHTTPServer(Config{NodeIP: "127.0.0.2", ListenPort: 0}, []Module{healthRouteModule()})
+	if err != nil {
+		t.Fatalf("newHTTPServer: %v", err)
+	}
+	if srv.loopbackListener == nil {
+		_ = srv.listener.Close()
+		t.Fatal("no loopback listener bound for a non-localhost node IP")
+	}
+	port := listenerPort(srv.listener)
+	loopbackAddr := srv.loopbackListener.Addr().(*net.TCPAddr)
+	if got, want := loopbackAddr.IP.String(), common.GetLocalhostIP(); got != want {
+		t.Errorf("loopback listener bound %s, want %s", got, want)
+	}
+	if loopbackAddr.Port != port {
+		t.Errorf("loopback listener port = %d, want the node-ip listener port %d", loopbackAddr.Port, port)
+	}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.serve() }()
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	for _, addr := range []string{
+		fmt.Sprintf("%s:%d", "127.0.0.2", port),
+		loopbackAddr.String(),
+	} {
+		resp, err := client.Get("http://" + addr + "/api/healthz")
+		if err != nil {
+			t.Fatalf("GET %s: %v", addr, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("GET %s = %d, want 200", addr, resp.StatusCode)
+		}
+	}
+
+	if err := srv.shutdown(context.Background()); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("serve: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve did not return after shutdown")
+	}
+	for _, addr := range []string{srv.listener.Addr().String(), loopbackAddr.String()} {
+		conn, err := net.DialTimeout("tcp", addr, time.Second)
+		if err == nil {
+			conn.Close()
+			t.Errorf("%s still accepting connections after shutdown", addr)
+		}
+	}
+
+	// A loopback node IP needs no second listener: the node-ip listener already
+	// answers the readiness probe.
+	local, err := newHTTPServer(Config{NodeIP: "127.0.0.1", ListenPort: 0}, nil)
+	if err != nil {
+		t.Fatalf("newHTTPServer for a loopback node IP: %v", err)
+	}
+	defer local.listener.Close()
+	if local.loopbackListener != nil {
+		t.Errorf("loopback listener bound for the loopback node IP %s", local.listener.Addr())
 	}
 }
 

@@ -36,6 +36,10 @@ type Config struct {
 	NodeID ids.NodeID
 	// IsHead indicates whether this agent runs on the head node.
 	IsHead bool
+	// Minimal disables both servers, mirroring the Python agent's --minimal
+	// mode, which skips _init_non_minimal and therefore leaves self.server and
+	// self.http_server as None (agent.py:94-95).
+	Minimal bool
 	// GCSAddress is the host:port of the GCS server.
 	GCSAddress string
 	// ClusterID identifies the cluster this agent belongs to.
@@ -60,6 +64,8 @@ type Config struct {
 	MetricsExportPort int
 	// MetricsCollectionDisabled disables metrics collection when true.
 	MetricsCollectionDisabled bool
+	// EventsExportAddr is the address events are exported to.
+	EventsExportAddr string
 	// HTTPClient is the shared HTTP client used by modules.
 	HTTPClient *http.Client
 }
