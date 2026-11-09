@@ -183,7 +183,7 @@ func (s *stateCgoClient) GetAllJobInfo(skipSubmissionJobInfoField, skipIsRunning
 	defer C.free(unsafe.Pointer(cJobOrSubmissionID))
 
 	err := cc.withPtr(func(ptr *C.CGcsClient) error {
-		ok := C.ray_gcs_client_jobs_get_all_job_info(
+		ok := jobsGetAllJobInfoC(
 			ptr,
 			cJobOrSubmissionID,
 			skipSubmission,

@@ -107,6 +107,9 @@ int ray_gcs_client_jobs_get_job_info(CGcsClient *client,
     std::vector<std::string> all_job_info =
         client->global_state_accessor->GetAllJobInfo(false, false, target_job_id);
 
+    // The server-side filter is a superset of the old client-side filter: it
+    // matches the job id or the submission id metadata. The job id comparison
+    // below remains authoritative, so the widened filter is result-neutral.
     for (const auto &serialized : all_job_info) {
       ray::rpc::JobTableData job_info;
       if (job_info.ParseFromString(serialized)) {

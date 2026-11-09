@@ -33,6 +33,7 @@ import (
 	"github.com/ray-project/ray/go/pkg/gcs"
 	"github.com/ray-project/ray/go/pkg/ids"
 	"github.com/ray-project/ray/go/proto"
+	protolib "google.golang.org/protobuf/proto"
 )
 
 // Cases that call ConnectClient with a reachable address are absent on purpose:
@@ -211,12 +212,22 @@ func errorFromNullCheck() ([]byte, error) {
 // Test_ListJobsWithFilter_forwardsFilterArgs verifies that ListJobsWithFilter
 // forwards the job-or-submission id and both skip flags to the C bridge, that an
 // empty id reaches C as an empty string, and that ListJobs delegates with no
-// filter and no field skipping.
+// filter and no field skipping. It also pins the non-empty return shape: a
+// serialized JobTableData returned by the bridge is unpacked into one job.
 func Test_ListJobsWithFilter_forwardsFilterArgs(t *testing.T) {
 	type cCall struct {
 		jobOrSubmissionID string
 		skipSubmission    C.int
 		skipRunningTasks  C.int
+	}
+
+	jobID, err := ids.JobIDFromHex("01000000")
+	if err != nil {
+		t.Fatalf("JobIDFromHex failed: %v", err)
+	}
+	payload, err := protolib.Marshal(&proto.JobTableData{JobId: jobID.Binary()})
+	if err != nil {
+		t.Fatalf("marshal JobTableData failed: %v", err)
 	}
 
 	var calls []cCall
@@ -235,16 +246,40 @@ func Test_ListJobsWithFilter_forwardsFilterArgs(t *testing.T) {
 			skipSubmission:    skipSubmissionField,
 			skipRunningTasks:  skipRunningTasksField,
 		})
-		*serializedOut = nil
-		*countOut = 0
-		return 0
+		if C.GoString(jobOrSubmissionID) == "" {
+			*serializedOut = nil
+			*countOut = 0
+			return 0
+		}
+		// Mimic the C bridge for the filtered call: one serialized JobTableData,
+		// with the outer array, the sizes array and the element all C-allocated so
+		// the production unpacking path owns and frees them.
+		cArray := (**C.char)(C.malloc(C.size_t(unsafe.Sizeof(uintptr(0)))))
+		unsafe.Slice(cArray, 1)[0] = (*C.char)(C.CBytes(payload))
+		cSizes := (*C.int)(C.malloc(C.size_t(unsafe.Sizeof(C.int(0)))))
+		unsafe.Slice(cSizes, 1)[0] = C.int(len(payload))
+		*serializedOut = cArray
+		*sizesOut = cSizes
+		*countOut = 1
+		return 1
 	}
 
 	client := &cgoClient{ptr: (*C.CGcsClient)(unsafe.Pointer(new(byte)))}
 	ctx := context.Background()
 
-	if _, err := client.ListJobsWithFilter(ctx, "01000000", true, false); err != nil {
+	jobs, err := client.ListJobsWithFilter(ctx, "01000000", true, false)
+	if err != nil {
 		t.Fatalf("ListJobsWithFilter returned error: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("expected 1 job from the filtered call, got %d", len(jobs))
+	}
+	gotID, err := ids.JobIDFromBinary(jobs[0].GetJobId())
+	if err != nil {
+		t.Fatalf("returned job id has invalid length: %v", err)
+	}
+	if gotID != jobID {
+		t.Errorf("expected job id %s, got %s", jobID.Hex(), gotID.Hex())
 	}
 	if _, err := client.ListJobsWithFilter(ctx, "", false, true); err != nil {
 		t.Fatalf("ListJobsWithFilter with empty id returned error: %v", err)

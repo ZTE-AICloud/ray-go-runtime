@@ -830,7 +830,8 @@ func (c *cgoClient) GetJobInfo(ctx context.Context, jobID ids.JobID) (*proto.Job
 
 // jobsGetAllJobInfoC calls the C bridge that lists jobs. It is a package-level
 // variable so unit tests can substitute a fake and assert the forwarded filter
-// arguments without a live GCS.
+// arguments without a live GCS. Tests in this package that override it must not
+// call t.Parallel, and must restore the original with t.Cleanup.
 var jobsGetAllJobInfoC = func(ptr *C.CGcsClient,
 	jobOrSubmissionID *C.char,
 	skipSubmissionField C.int,
