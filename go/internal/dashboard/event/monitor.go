@@ -17,6 +17,7 @@ package event
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -291,6 +292,11 @@ func monitorEvents(ctx context.Context, eventDir string, queue chan<- []string) 
 
 	for {
 		if err := m.scan(ctx, callback); err != nil {
+			// A scan interrupted by ctx cancellation is a normal shutdown (it
+			// is the path a blocked queue-full send takes), not an error.
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return nil
+			}
 			log.Log.Error(err, "Error scanning event log files; continuing", "event_dir", eventDir)
 		}
 		select {
@@ -341,10 +347,17 @@ func (m *monitor) scan(ctx context.Context, callback func([]string) error) error
 	close(errCh)
 	var firstErr error
 	for err := range errCh {
-		if err != nil && firstErr == nil {
-			log.Log.Error(err, "Read event file failed")
-			firstErr = err
+		if err == nil || firstErr != nil {
+			continue
 		}
+		// A read interrupted by ctx cancellation (including a callback blocked
+		// on a full queue during shutdown) is a normal shutdown, not an error.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			log.Log.V(1).Info("Event file scan interrupted by shutdown", "event_dir", m.eventDir)
+			continue
+		}
+		log.Log.Error(err, "Read event file failed")
+		firstErr = err
 	}
 	return firstErr
 }

@@ -49,7 +49,9 @@ type EventAgent struct {
 	// moduleStarted records when the module was created.
 	moduleStarted time.Time
 
-	// dashboardHTTPAddress is lazily resolved on first use and never changed.
+	// dashboardHTTPAddress is lazily resolved on first use. Once resolved it is
+	// cached until a report fails, which invalidates it (see reportBatch) so the
+	// next attempt re-reads the address from GCS.
 	dashboardHTTPAddress atomic.Value
 	// addressResolved reports whether dashboardHTTPAddress has been set.
 	addressResolved atomic.Bool

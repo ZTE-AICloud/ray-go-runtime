@@ -35,9 +35,11 @@ go_test(
         "auth_test.go",
         "browser_test.go",
         "cors_test.go",
+        "token_test.go",
     ],
     embed = [":auth"],
     deps = [
+        "//go/pkg/gcs",
         "@com_github_coder_websocket//:websocket",
     ],
 )

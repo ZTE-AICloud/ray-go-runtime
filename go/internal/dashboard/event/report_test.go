@@ -30,6 +30,7 @@ import (
 
 	"github.com/ray-project/ray/go/internal/common"
 	"github.com/ray-project/ray/go/internal/dashboard/agent"
+	"github.com/ray-project/ray/go/internal/dashboard/auth"
 	"github.com/ray-project/ray/go/pkg/gcs"
 )
 
@@ -377,38 +378,83 @@ func TestReportEventsPostsToSchemeLessAddress(t *testing.T) {
 	}
 }
 
-// TestPostOnceSendsAuthHeader checks that when RAY_AUTH_MODE is token or k8s
+// TestPostOnceSendsAuthHeader checks that when token authentication is enabled
 // the report POST carries the bearer token (Python
-// get_auth_headers_if_auth_enabled reads the token in both modes).
+// get_auth_headers_if_auth_enabled), with the token resolved by the shared auth
+// package: RAY_AUTH_TOKEN in token mode, the Ray service-account token in k8s
+// mode, and the default ~/.ray/auth_token path.
 func TestPostOnceSendsAuthHeader(t *testing.T) {
-	for _, mode := range []string{"token", "k8s"} {
-		t.Run(mode, func(t *testing.T) {
-			t.Setenv("RAY_AUTH_MODE", mode)
-			t.Setenv("RAY_AUTH_TOKEN", "secret-token")
+	t.Run("token env", func(t *testing.T) {
+		t.Setenv("RAY_AUTH_MODE", "token")
+		t.Setenv("RAY_AUTH_TOKEN", "secret-token")
+		if got := postOnceAuthHeader(t); got != "Bearer secret-token" {
+			t.Errorf("Authorization header = %q, want %q", got, "Bearer secret-token")
+		}
+	})
 
-			var (
-				mu     sync.Mutex
-				header string
-			)
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				mu.Lock()
-				header = r.Header.Get("Authorization")
-				mu.Unlock()
-				w.WriteHeader(http.StatusOK)
-			}))
-			defer srv.Close()
+	t.Run("k8s service account token", func(t *testing.T) {
+		t.Setenv("RAY_AUTH_MODE", "k8s")
+		t.Setenv("RAY_AUTH_TOKEN", "")
+		t.Setenv("RAY_AUTH_TOKEN_PATH", "")
+		t.Setenv("RAY_ENABLE_K8S_TOKEN_AUTH", "1")
+		t.Setenv("HOME", t.TempDir())
+		path := filepath.Join(t.TempDir(), "sa-token")
+		if err := os.WriteFile(path, []byte("sa-token\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		oldPath := auth.RayServiceAccountTokenPath
+		auth.RayServiceAccountTokenPath = path
+		t.Cleanup(func() { auth.RayServiceAccountTokenPath = oldPath })
 
-			e := newEventAgent(t, &fakeGCS{dashboardAddr: srv.URL})
-			if err := e.postOnce(context.Background(), srv.URL, []byte(`["x"]`)); err != nil {
-				t.Fatalf("postOnce: %v", err)
-			}
-			mu.Lock()
-			defer mu.Unlock()
-			if header != "Bearer secret-token" {
-				t.Errorf("Authorization header = %q, want %q", header, "Bearer secret-token")
-			}
-		})
+		if got := postOnceAuthHeader(t); got != "Bearer sa-token" {
+			t.Errorf("Authorization header = %q, want %q", got, "Bearer sa-token")
+		}
+	})
+
+	t.Run("default token path", func(t *testing.T) {
+		t.Setenv("RAY_AUTH_MODE", "token")
+		t.Setenv("RAY_AUTH_TOKEN", "")
+		t.Setenv("RAY_AUTH_TOKEN_PATH", "")
+		t.Setenv("RAY_ENABLE_K8S_TOKEN_AUTH", "")
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		path := filepath.Join(home, ".ray", "auth_token")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("home-token\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		if got := postOnceAuthHeader(t); got != "Bearer home-token" {
+			t.Errorf("Authorization header = %q, want %q", got, "Bearer home-token")
+		}
+	})
+}
+
+// postOnceAuthHeader posts one batch to a throwaway head and returns the
+// Authorization header the request carried.
+func postOnceAuthHeader(t *testing.T) string {
+	t.Helper()
+	var (
+		mu     sync.Mutex
+		header string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		header = r.Header.Get("Authorization")
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	e := newEventAgent(t, &fakeGCS{dashboardAddr: srv.URL})
+	if err := e.postOnce(context.Background(), srv.URL, []byte(`["x"]`)); err != nil {
+		t.Fatalf("postOnce: %v", err)
 	}
+	mu.Lock()
+	defer mu.Unlock()
+	return header
 }
 
 // TestPostOnceNoAuthHeaderWhenDisabled checks that without RAY_AUTH_MODE=token

@@ -22,21 +22,20 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/ray-project/ray/go/internal/common"
 	"github.com/ray-project/ray/go/internal/dashboard/agent"
 	"github.com/ray-project/ray/go/internal/dashboard/auth"
-	"github.com/ray-project/ray/go/pkg/gcs"
 	"github.com/ray-project/ray/go/pkg/log"
 )
 
 // resolveDashboardAddress lazily gets the head dashboard HTTP address from GCS
 // InternalKV, retrying until found; once resolved the address is cached.
-// forceRefresh bypasses the cache and re-reads the address, which the report
-// loop uses after a failed report so a restarted or moved head is picked up.
+// forceRefresh bypasses the cache and re-reads the address; it is a one-shot
+// test seam. Production re-resolution relies on reportBatch invalidating the
+// cache after a failed report.
 func (e *EventAgent) resolveDashboardAddress(ctx context.Context, forceRefresh bool) (string, error) {
 	for {
 		if e.addressResolved.Load() && !forceRefresh {
@@ -233,26 +232,12 @@ func (e *EventAgent) postOnce(ctx context.Context, addr string, body []byte) err
 
 // authHeaders returns the Authorization header for report requests when token
 // authentication is enabled, mirroring Python's
-// get_auth_headers_if_auth_enabled. The enabled check is the shared auth
-// package's TokenAuthEnabled (token or k8s mode); the token follows the same
-// precedence as the auth token loader (RAY_AUTH_TOKEN env, then the first
-// non-empty line of RAY_AUTH_TOKEN_PATH read through gcs.ReadTokenFile). A nil
-// map means no header is attached.
+// get_auth_headers_if_auth_enabled. The token comes from the shared auth
+// package (full C++ AuthenticationTokenLoader source precedence); a nil map
+// means no header is attached.
 func authHeaders() map[string]string {
-	if !auth.TokenAuthEnabled() {
-		return nil
-	}
-	token := os.Getenv("RAY_AUTH_TOKEN")
-	if token == "" {
-		if path := os.Getenv("RAY_AUTH_TOKEN_PATH"); path != "" {
-			if t, err := gcs.ReadTokenFile(path); err == nil {
-				token = t
-			}
-		}
-	}
-	if token == "" {
-		log.Log.V(1).Info("Token authentication is enabled but no token was found. " +
-			"Requests to authenticated clusters will fail.")
+	token, ok := auth.RequestToken()
+	if !ok {
 		return nil
 	}
 	return map[string]string{auth.AuthorizationHeaderName: auth.BearerPrefix + token}

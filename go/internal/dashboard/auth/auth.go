@@ -21,6 +21,9 @@ import (
 	"crypto/subtle"
 	"net/http"
 	"os"
+	"os/user"
+	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/ray-project/ray/go/pkg/gcs"
@@ -49,6 +52,88 @@ func AuthenticationModeName() string {
 		return "disabled"
 	}
 	return os.Getenv("RAY_AUTH_MODE")
+}
+
+// Environment variables read by RequestToken, matching the C++
+// AuthenticationTokenLoader sources (authentication_token_loader.cc). The
+// first two names are the same ones go/pkg/gcs reads; the k8s flag mirrors
+// ENABLE_K8S_TOKEN_AUTH (src/ray/common/ray_config_def.h).
+const (
+	envAuthToken          = "RAY_AUTH_TOKEN"
+	envAuthTokenPath      = "RAY_AUTH_TOKEN_PATH"
+	envEnableK8sTokenAuth = "RAY_ENABLE_K8S_TOKEN_AUTH"
+)
+
+// RayServiceAccountTokenPath is the in-pod Ray service-account token file read
+// as the third token source. It mirrors gcs.RayServiceAccountTokenPath and is
+// a variable so tests can substitute a fixture.
+var RayServiceAccountTokenPath = gcs.RayServiceAccountTokenPath
+
+// RequestToken returns the bearer token an outgoing dashboard request must
+// carry, resolving it with the C++ AuthenticationTokenLoader precedence
+// (TryLoadTokenFromSources in authentication_token_loader.cc):
+//  1. RAY_AUTH_TOKEN, whitespace-trimmed.
+//  2. RAY_AUTH_TOKEN_PATH, first non-empty line via gcs.ReadTokenFile. A path
+//     that is set but unreadable or empty is a hard stop: the C++ loader
+//     returns an error instead of falling through to later sources.
+//  3. The Ray service-account token when RAY_ENABLE_K8S_TOKEN_AUTH is on.
+//  4. The default ~/.ray/auth_token.
+//
+// It returns false when token authentication is disabled (RAY_AUTH_MODE is
+// neither token nor k8s) or no source yields a token, so callers attach no
+// header. Nothing is cached: token files are re-read on every call so a rotated
+// token takes effect without a restart, matching the gcs dial layer.
+func RequestToken() (string, bool) {
+	if !TokenAuthEnabled() {
+		return "", false
+	}
+	if token := strings.TrimSpace(os.Getenv(envAuthToken)); token != "" {
+		return token, true
+	}
+	if path := os.Getenv(envAuthTokenPath); path != "" {
+		token, err := gcs.ReadTokenFile(path)
+		if err != nil || token == "" {
+			return "", false
+		}
+		return token, true
+	}
+	if isEnvTrue(envEnableK8sTokenAuth) {
+		if token, err := gcs.ReadTokenFile(RayServiceAccountTokenPath); err == nil && token != "" {
+			return token, true
+		}
+	}
+	if path := defaultTokenPath(); path != "" {
+		if token, err := gcs.ReadTokenFile(path); err == nil && token != "" {
+			return token, true
+		}
+	}
+	return "", false
+}
+
+// isEnvTrue reports whether the environment variable is truthy, matching the
+// C++ ConvertValue<bool> values ("1" and "true", case-insensitive).
+func isEnvTrue(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true":
+		return true
+	default:
+		return false
+	}
+}
+
+// defaultTokenPath returns ~/.ray/auth_token, resolving HOME with a fallback to
+// the user database when HOME is unset (C++ GetDefaultTokenPath).
+func defaultTokenPath() string {
+	home := os.Getenv("HOME")
+	if home == "" {
+		if u, err := user.Current(); err == nil {
+			home = u.HomeDir
+		}
+	}
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, gcs.DefaultAuthTokenPath)
 }
 
 // ValidateRequestToken validates an Authorization header containing a Bearer
