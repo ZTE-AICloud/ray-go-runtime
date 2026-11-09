@@ -44,11 +44,20 @@ const (
 	noSetAscendRTVisibleDevicesEnvVar          = "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"
 	// rayInternalDashboardNamespace is the job config namespace of the agent's
 	// driver runtime, composed like the Python job manager's
-	// RAY_INTERNAL_NAMESPACE_PREFIX + "_dashboard".
-	rayInternalDashboardNamespace = jobutil.RayInternalNamespacePrefix + "_dashboard"
+	// RAY_INTERNAL_NAMESPACE_PREFIX + "dashboard". RayInternalNamespacePrefix
+	// already ends in "_", so the suffix carries no leading underscore.
+	rayInternalDashboardNamespace = jobutil.RayInternalNamespacePrefix + "dashboard"
 )
 
 const jobMonitorLoopPeriodS = time.Second
+
+// jobEventSink is the event emission surface used by the job manager. The
+// production implementation is *jobEventLogger, whose emit methods are
+// nil-safe; the interface keeps the monitor's event decisions testable.
+type jobEventSink interface {
+	submissionStarted(submissionID string)
+	submissionCompleted(jobID string, status JobStatus, errorMessage string)
+}
 
 // JobManager drives the Python JobSupervisor actors of the submission jobs
 // owned by this agent. Behavior mirrors the Python dashboard's JobManager.
@@ -63,7 +72,7 @@ type JobManager struct {
 
 	jobInfoClient *JobInfoStorageClient
 	logClient     *JobLogStorageClient
-	eventLogger   *jobEventLogger
+	eventLogger   jobEventSink
 
 	monitoredJobs sync.Map
 	recoverDone   chan struct{}
@@ -201,11 +210,53 @@ func (m *JobManager) appendDriverLog(jobID, line string) {
 }
 
 // putStatus is the only path that writes a job status from this process. See
-// the statusMu comment for why the write is serialized.
+// the statusMu comment for why the write is serialized. A missing record means
+// the job was deleted while the caller was racing it: PutStatus would create a
+// new record, so the write is dropped instead of resurrecting a deleted job.
 func (m *JobManager) putStatus(ctx context.Context, jobID string, status JobStatus, message *string, driverExitCode *int32, errorType *JobErrorType) error {
 	m.statusMu.Lock()
 	defer m.statusMu.Unlock()
+	existing, err := m.jobInfoClient.GetStatus(ctx, jobID)
+	if err != nil {
+		return err
+	}
+	if existing == nil {
+		log.Log.V(4).Info("job record is gone; dropping status write", "job_id", jobID, "status", status)
+		return nil
+	}
 	return m.jobInfoClient.PutStatus(ctx, jobID, status, message, driverExitCode, errorType)
+}
+
+// handleSupervisorFailure handles a ping failure of the supervisor. The status
+// is re-read first: a stop that landed after the monitor loop's last status
+// read makes the actor exit expected, not a job failure. Python performs the
+// same read inside its exception handler.
+func (m *JobManager) handleSupervisorFailure(jobID string, pingErr error) {
+	jobStatus, err := m.jobInfoClient.GetStatus(m.ctx, jobID)
+	if err != nil {
+		log.Log.Error(err, "failed to re-read job status after a supervisor ping failure")
+	}
+	if jobStatus != nil && jobStatus.IsTerminal() {
+		// The supervisor exiting after the job reached a terminal state is
+		// expected.
+		m.eventLogger.submissionCompleted(jobID, *jobStatus, "")
+		return
+	}
+
+	msg, et := classifySupervisorError(pingErr)
+	if perr := m.putStatus(m.ctx, jobID, JobStatusFailed, msg, nil, &et); perr != nil {
+		log.Log.Error(perr, "failed to update job status")
+	}
+	log.Log.Error(pingErr, "job monitoring failed")
+	var errorMessage string
+	if msg != nil {
+		errorMessage = *msg
+	}
+	// Write the error to the driver log file for easy access.
+	if errorMessage != "" {
+		m.appendDriverLog(jobID, errorMessage)
+	}
+	m.eventLogger.submissionCompleted(jobID, JobStatusFailed, errorMessage)
 }
 
 // recoverRunningJobs resumes monitoring every job that was not terminal when
@@ -505,26 +556,7 @@ func (m *JobManager) monitorJobInternal(jobID string, supervisor *supervisorActo
 		}
 
 		if err := supervisor.ping(); err != nil {
-			if jobStatus != nil && jobStatus.IsTerminal() {
-				// The supervisor exiting after the job reached a terminal state
-				// is expected.
-				m.eventLogger.submissionCompleted(jobID, *jobStatus, "")
-				break
-			}
-			msg, et := classifySupervisorError(err)
-			if perr := m.putStatus(m.ctx, jobID, JobStatusFailed, msg, nil, &et); perr != nil {
-				log.Log.Error(perr, "failed to update job status")
-			}
-			log.Log.Error(err, "job monitoring failed")
-			var errorMessage string
-			if msg != nil {
-				errorMessage = *msg
-			}
-			// Write the error to the driver log file for easy access.
-			if errorMessage != "" {
-				m.appendDriverLog(jobID, errorMessage)
-			}
-			m.eventLogger.submissionCompleted(jobID, JobStatusFailed, errorMessage)
+			m.handleSupervisorFailure(jobID, err)
 			break
 		}
 	}

@@ -139,9 +139,11 @@ func (a *supervisorActor) stop() error {
 }
 
 // kill force-kills the supervisor actor without restart, matching the Python
-// defensive ray.kill(no_restart=True).
+// defensive ray.kill(no_restart=True). force is a no-op when noRestart is set
+// (the GCS destroy path always force-kills), so it stays false to state the
+// Python intent exactly.
 func (a *supervisorActor) kill() error {
-	return api.KillActor(a.handle, true, true)
+	return api.KillActor(a.handle, false, true)
 }
 
 // actorError is the message-only base of the supervisor error kinds.

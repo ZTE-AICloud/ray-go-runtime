@@ -120,12 +120,29 @@ func TestSupervisorCodeSearchPath(t *testing.T) {
 	assert.NotEmpty(t, paths[0])
 }
 
+// TestRayInternalDashboardNamespace pins the composed namespace against the
+// double-underscore regression: the shared prefix already ends in "_".
+func TestRayInternalDashboardNamespace(t *testing.T) {
+	assert.Equal(t, "_ray_internal_dashboard", rayInternalDashboardNamespace)
+}
+
+func TestApplySchedulingStrategyResourcesSpecified(t *testing.T) {
+	// An entrypoint with explicit resources keeps the default scheduling so
+	// the actor lands where its resources are available.
+	ctx := t.Context()
+	client := newFakeGCSClient()
+	_, err := client.Put(ctx, kvNamespaceJob, kvHeadNodeIDKey, []byte("head-node-id"), false)
+	require.NoError(t, err)
+	jm := &JobManager{jobInfoClient: NewJobInfoStorageClient(client), ctx: ctx}
+
+	assert.Nil(t, jm.applySchedulingStrategy("sub1", true))
+}
+
 func TestApplySchedulingStrategyNoHeadNode(t *testing.T) {
-	// With a fake client that has no head node id, and resources specified,
-	// the strategy must be nil (default scheduling).
+	// Without a head node id in the KV the strategy must fall back to default
+	// scheduling (nil affinity) and submission proceeds.
 	jm := &JobManager{jobInfoClient: NewJobInfoStorageClient(newFakeGCSClient()), ctx: t.Context()}
-	opts := jm.applySchedulingStrategy("sub1", true)
-	assert.Nil(t, opts)
+	assert.Nil(t, jm.applySchedulingStrategy("sub1", false))
 }
 
 func TestApplySchedulingStrategyPinsToHeadNode(t *testing.T) {
@@ -253,4 +270,102 @@ func TestPutStatusConcurrentTransitionsDoNotResurrect(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, status)
 	assert.True(t, status.IsTerminal())
+}
+
+// TestPutStatusDoesNotResurrectDeletedJob pins the delete tombstone: a monitor
+// that read the status before a concurrent delete must not recreate the record
+// (PutStatus creates missing records).
+func TestPutStatusDoesNotResurrectDeletedJob(t *testing.T) {
+	ctx := t.Context()
+	jm := &JobManager{jobInfoClient: NewJobInfoStorageClient(newFakeGCSClient()), ctx: ctx}
+	_, err := jm.jobInfoClient.PutInfo(ctx, "job1", &JobInfo{Entrypoint: "python -c pass", Status: JobStatusPending}, false)
+	require.NoError(t, err)
+	require.NoError(t, jm.jobInfoClient.DeleteInfo(ctx, "job1"))
+
+	require.NoError(t, jm.putStatus(ctx, "job1", JobStatusFailed, nil, nil, nil))
+
+	info, err := jm.jobInfoClient.GetInfo(ctx, "job1")
+	require.NoError(t, err)
+	assert.Nil(t, info, "a monitor status write must not recreate a deleted job")
+}
+
+// completedEvent records one submissionCompleted emission for assertions.
+type completedEvent struct {
+	jobID  string
+	status JobStatus
+	errMsg string
+}
+
+// recordingEventSink captures the manager's event emissions in memory.
+type recordingEventSink struct {
+	started   []string
+	completed []completedEvent
+}
+
+func (r *recordingEventSink) submissionStarted(submissionID string) {
+	r.started = append(r.started, submissionID)
+}
+
+func (r *recordingEventSink) submissionCompleted(jobID string, status JobStatus, errorMessage string) {
+	r.completed = append(r.completed, completedEvent{jobID: jobID, status: status, errMsg: errorMessage})
+}
+
+// newTestJobManager builds a manager backed by the in-memory GCS and a
+// recording event sink.
+func newTestJobManager(t *testing.T) (*JobManager, *recordingEventSink) {
+	t.Helper()
+	sink := &recordingEventSink{}
+	jm := &JobManager{
+		ctx:           t.Context(),
+		jobInfoClient: NewJobInfoStorageClient(newFakeGCSClient()),
+		logClient:     NewJobLogStorageClient(t.TempDir()),
+		eventLogger:   sink,
+	}
+	return jm, sink
+}
+
+// TestHandleSupervisorFailureAfterCleanStop covers the stop race: the monitor
+// loop still holds a stale PENDING status when the ping fails because the job
+// was stopped, so the failure handler must re-read the status and treat the
+// actor exit as expected (no FAILED event, no error line in the driver log).
+func TestHandleSupervisorFailureAfterCleanStop(t *testing.T) {
+	ctx := t.Context()
+	jm, sink := newTestJobManager(t)
+	_, err := jm.jobInfoClient.PutInfo(ctx, "job1", &JobInfo{Entrypoint: "python -c pass", Status: JobStatusPending}, false)
+	require.NoError(t, err)
+	// The Python supervisor writes STOPPED while the monitor already read
+	// PENDING.
+	require.NoError(t, jm.jobInfoClient.PutStatus(ctx, "job1", JobStatusStopped, nil, nil, nil))
+
+	jm.handleSupervisorFailure("job1", errors.New("actor died"))
+
+	status, err := jm.getJobStatus(ctx, "job1")
+	require.NoError(t, err)
+	require.NotNil(t, status)
+	assert.Equal(t, JobStatusStopped, *status)
+	require.Len(t, sink.completed, 1)
+	assert.Equal(t, JobStatusStopped, sink.completed[0].status)
+	assert.Empty(t, sink.completed[0].errMsg)
+	assert.Empty(t, jm.getJobLogs("job1"), "an expected exit must not write an error line")
+	assert.Empty(t, sink.started)
+}
+
+// TestHandleSupervisorFailureWritesFailed covers the genuine failure path: the
+// classified error is persisted, emitted, and appended to the driver log.
+func TestHandleSupervisorFailureWritesFailed(t *testing.T) {
+	ctx := t.Context()
+	jm, sink := newTestJobManager(t)
+	_, err := jm.jobInfoClient.PutInfo(ctx, "job1", &JobInfo{Entrypoint: "python -c pass", Status: JobStatusPending}, false)
+	require.NoError(t, err)
+
+	jm.handleSupervisorFailure("job1", errors.New("ActorDiedError: supervisor exited"))
+
+	status, err := jm.getJobStatus(ctx, "job1")
+	require.NoError(t, err)
+	require.NotNil(t, status)
+	assert.Equal(t, JobStatusFailed, *status)
+	require.Len(t, sink.completed, 1)
+	assert.Equal(t, JobStatusFailed, sink.completed[0].status)
+	assert.NotEmpty(t, sink.completed[0].errMsg)
+	assert.Contains(t, jm.getJobLogs("job1"), "Job supervisor actor died")
 }
