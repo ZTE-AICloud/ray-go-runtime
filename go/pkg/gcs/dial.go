@@ -162,6 +162,18 @@ func DialGCS(ctx context.Context, address string, opts DialOptions) (*grpc.Clien
 	}
 }
 
+// PlainTCPDialer dials the GCS address directly with a plain TCP dialer.
+// grpc-go's default dialer fails to complete the HTTP/2 cleartext handshake
+// with the Ray GCS server (the connection stalls in CONNECTING and RPCs fail
+// with "waiting for new LB policy update"), whereas a plain net.Dial completes
+// it. This was reproduced against a live GCS and verified in isolation, so
+// every in-process caller dials GCS through this dialer unless it explicitly
+// supplies its own.
+func PlainTCPDialer(ctx context.Context, address string) (net.Conn, error) {
+	var d net.Dialer
+	return d.DialContext(ctx, "tcp", address)
+}
+
 // buildTLSConfig builds a *tls.Config from the CA/cert/key paths, or returns
 // (nil, nil) when no caFile is set (plaintext). When certFile and keyFile are
 // also set, mutual TLS is enabled with the client certificate.

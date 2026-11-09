@@ -175,3 +175,22 @@ func TestOverrideKeepsASetDialer(t *testing.T) {
 		t.Fatalf("ConnectTimeoutMs = %d, want 100", got.ConnectTimeoutMs)
 	}
 }
+
+func TestPlainTCPDialerConnectsAndFails(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	conn, err := PlainTCPDialer(context.Background(), ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial %s: %v", ln.Addr(), err)
+	}
+	conn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := PlainTCPDialer(ctx, "127.0.0.1:1"); err == nil {
+		t.Fatal("dialing a closed port must fail")
+	}
+}

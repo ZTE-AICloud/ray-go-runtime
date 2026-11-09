@@ -59,6 +59,15 @@ func NewClient(ctx context.Context, opts gcs.ClientOptions) (*Client, error) {
 		}
 	}
 	dialOpts.ConnectTimeoutMs = opts.TimeoutMs
+	// Default to the plain-TCP dialer the head also uses: grpc-go's default
+	// dialer can stall the HTTP/2 cleartext handshake against the Ray GCS
+	// server (see gcs.PlainTCPDialer), and the log monitor that consumes this
+	// client dials the same server on the same node. A caller that set its own
+	// dialer is left untouched; a nil Dialer — unset or deliberately empty —
+	// falls back to the plain-TCP dialer.
+	if dialOpts.Dialer == nil {
+		dialOpts.Dialer = gcs.PlainTCPDialer
+	}
 	conn, err := gcs.DialGCS(ctx, opts.Address, dialOpts)
 	if err != nil {
 		return nil, fmt.Errorf("dial GCS %s: %w", opts.Address, err)

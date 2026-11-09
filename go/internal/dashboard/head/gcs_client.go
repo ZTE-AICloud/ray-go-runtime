@@ -20,7 +20,6 @@ package head
 import (
 	"context"
 	"fmt"
-	"net"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -32,17 +31,10 @@ import (
 )
 
 // grpcDialer is the plain-TCP dialer the head hands to gcs.DialGCS. It is a
-// variable so tests can observe that the built connection dials through it.
-var grpcDialer = func(ctx context.Context, address string) (net.Conn, error) {
-	// Dial the GCS address directly with a plain TCP dialer. grpc-go's default
-	// dialer fails to complete the HTTP/2 cleartext handshake with the Ray GCS
-	// server (the connection stalls in CONNECTING and RPCs fail with "waiting
-	// for new LB policy update"), whereas a plain net.Dial completes it. This
-	// was reproduced against a live GCS and verified in isolation, so force the
-	// direct TCP dialer here.
-	var d net.Dialer
-	return d.DialContext(ctx, "tcp", address)
-}
+// package variable so tests can observe that the built connection dials
+// through it; see gcs.PlainTCPDialer for why grpc-go's default dialer cannot
+// be used.
+var grpcDialer = gcs.PlainTCPDialer
 
 // GRPCOption configures the GCS client connection.
 type GRPCOption func(*grpcClientConfig)
