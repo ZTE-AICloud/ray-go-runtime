@@ -19,22 +19,26 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/ray-project/ray/go/internal/common"
+	gcsgrpc "github.com/ray-project/ray/go/internal/gcs/grpc"
 	"github.com/ray-project/ray/go/internal/logmonitor"
 	"github.com/ray-project/ray/go/pkg/gcs"
 	"github.com/ray-project/ray/go/pkg/ids"
 	"github.com/ray-project/ray/go/pkg/log/logconfig"
 	lj "github.com/ray-project/ray/go/pkg/log/lumberjack"
 	"github.com/ray-project/ray/go/pkg/log/zap"
-	"github.com/ray-project/ray/go/pkg/runtime/plugin"
 )
 
 const (
@@ -42,6 +46,9 @@ const (
 	autoscalerStateNamespace      = "__autoscaler"
 	autoscalerV2EnabledKey        = "__autoscaler_v2_enabled"
 	runtimeEnvLogToDriverEnvVar   = "RAY_RUNTIME_ENV_LOG_TO_DRIVER_ENABLED"
+	envMaxLineSize                = "RAY_GO_LOG_MONITOR_MAX_LINE_BYTES"
+	envMemoryLimit                = "RAY_GO_LOG_MONITOR_MEMLIMIT"
+	defaultMemoryLimit            = 64 << 20
 	defaultGCSConnectTimeoutMilli = int64(5000)
 	defaultGCSStartupRetryTimeout = 30 * time.Second
 	defaultGCSStartupRetryDelay   = 250 * time.Millisecond
@@ -70,47 +77,140 @@ type monitorRunner interface {
 	Run(context.Context) error
 }
 
+// gcsClient is the minimal GCS surface the log monitor needs: internal KV
+// reads for autoscaler v2 detection, log batch publishing and lifecycle
+// management. Implemented by the pure-Go gRPC client (go/internal/gcs/grpc).
+type gcsClient interface {
+	Get(ctx context.Context, ns, key string) ([]byte, error)
+	PublishLogBatch(ctx context.Context, payload gcs.LogBatchPayload) error
+	Close() error
+}
+
 type runnerDeps struct {
 	loadNodeIPAddress func(string) (string, error)
-	validatePlugin    func() error
-	connectGCSClient  func(gcs.ClientOptions) (gcs.Client, error)
+	connectGCSClient  func(context.Context, gcs.ClientOptions) (gcsClient, error)
 	retryTimeout      time.Duration
 	retryDelay        time.Duration
-	newPublishClient  func(gcs.Client) (gcs.LogBatchPublisher, error)
 	newMonitor        func(ip string, opts *Options, publisher logmonitor.Publisher, autoscalerV2 bool, runtimeEnvToDriver bool) (monitorRunner, error)
 }
 
 var defaultRunnerDeps = runnerDeps{
 	loadNodeIPAddress: defaultLoadNodeIPAddress,
-	validatePlugin:    plugin.CheckPluginLoadable,
-	connectGCSClient: func(opts gcs.ClientOptions) (gcs.Client, error) {
-		return plugin.LoadGCSClient(opts)
+	connectGCSClient: func(ctx context.Context, opts gcs.ClientOptions) (gcsClient, error) {
+		return gcsgrpc.NewClient(ctx, opts)
 	},
 	retryTimeout: defaultGCSStartupRetryTimeout,
 	retryDelay:   defaultGCSStartupRetryDelay,
-	newPublishClient: func(client gcs.Client) (gcs.LogBatchPublisher, error) {
-		return plugin.LoadLogBatchPublisher(client)
-	},
 	newMonitor: func(ip string, opts *Options, publisher logmonitor.Publisher, autoscalerV2 bool, runtimeEnvToDriver bool) (monitorRunner, error) {
 		return logmonitor.NewWithConfig(ip, opts.LogsDir, publisher, logmonitor.RuntimeConfig{
 			RuntimeEnvToDriver:  runtimeEnvToDriver,
 			AutoscalerV2Enabled: autoscalerV2,
+			MaxLineSize:         maxLineSizeFromEnv(),
 		})
 	},
 }
 
+// envPositiveInt reads key as a positive integer, falling back to defaultVal
+// when the variable is unset or not a positive integer. A warning is written
+// to stderr when the variable is set but invalid, so a misconfiguration (wrong
+// name, unit, or value) surfaces instead of silently falling back to the
+// default.
+func envPositiveInt(key string, defaultVal int) int {
+	v := common.EnvInteger(key, 0)
+	if v > 0 {
+		return v
+	}
+	if _, ok := os.LookupEnv(key); ok {
+		fmt.Fprintf(os.Stderr,
+			"log_monitor: ignoring invalid %s (want a positive integer); using default %d\n",
+			key, defaultVal)
+	}
+	return defaultVal
+}
+
+func maxLineSizeFromEnv() int {
+	return envPositiveInt(envMaxLineSize, logmonitor.DefaultMaxLineSize())
+}
+
+// applyMemoryLimit sets the Go soft memory limit for this process. An explicit
+// RAY_GO_LOG_MONITOR_MEMLIMIT always wins. Otherwise a process-level GOMEMLIMIT
+// is honored as-is so a cluster-wide memory policy is not silently overridden;
+// only when neither is set is the built-in default applied.
+func applyMemoryLimit() int64 {
+	if v := common.EnvInteger(envMemoryLimit, 0); v > 0 {
+		limit := int64(v)
+		debug.SetMemoryLimit(limit)
+		return limit
+	}
+	if limit, ok := parseGOMEMLIMIT(os.Getenv("GOMEMLIMIT")); ok {
+		return limit
+	}
+	limit := int64(defaultMemoryLimit)
+	debug.SetMemoryLimit(limit)
+	return limit
+}
+
+// parseGOMEMLIMIT parses a Go runtime GOMEMLIMIT value following the runtime's
+// parseByteCount rules (an integer byte count with an optional binary unit
+// suffix such as "B", "KiB", "MiB", "GiB" or "TiB", matching the regex
+// ^[0-9]+(([KMGT]i)?B)?$) plus the "off" sentinel that disables the limit.
+// It reports (MaxInt64, true) for "off" and false for empty, "-1" or otherwise
+// invalid values so the caller can fall back to its own default. Unlike the
+// runtime (which aborts on malformed values at startup), values the runtime
+// rejects simply fall back to the default here.
+func parseGOMEMLIMIT(s string) (int64, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "-1" {
+		return 0, false
+	}
+	if s == "off" {
+		return math.MaxInt64, true
+	}
+	i := 0
+	for ; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			break
+		}
+	}
+	if i == 0 {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(s[:i], 10, 64)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	var mult int64 = 1
+	switch s[i:] {
+	case "", "B":
+		mult = 1
+	case "KiB":
+		mult = 1 << 10
+	case "MiB":
+		mult = 1 << 20
+	case "GiB":
+		mult = 1 << 30
+	case "TiB":
+		mult = 1 << 40
+	default:
+		return 0, false
+	}
+	if n > math.MaxInt64/mult {
+		return 0, false
+	}
+	limit := n * mult
+	if limit <= 0 {
+		return 0, false
+	}
+	return limit, true
+}
+
 func runLogMonitor(opts *Options) error {
+	limit := applyMemoryLimit()
+	fmt.Fprintf(os.Stderr, "log_monitor: effective soft memory limit %d bytes\n", limit)
 	return runLogMonitorWithDeps(opts, defaultRunnerDeps)
 }
 
 func runLogMonitorWithDeps(opts *Options, deps runnerDeps) error {
-	// Fail fast on deployment errors (missing/invalid go_runtime.so)
-	// before the GCS-connect retry loop (which would otherwise retry for 30s).
-	if deps.validatePlugin != nil {
-		if err := deps.validatePlugin(); err != nil {
-			return err
-		}
-	}
 	if err := setupLogger(opts); err != nil {
 		return err
 	}
@@ -141,11 +241,6 @@ func runLogMonitorWithDeps(opts *Options, deps runnerDeps) error {
 	}
 	defer client.Close()
 
-	publishClient, err := deps.newPublishClient(client)
-	if err != nil {
-		return fmt.Errorf("create log publish client: %w", err)
-	}
-
 	autoscalerV2, err := detectAutoscalerV2EnabledWithRetry(ctx, deps, func(ctx context.Context) (bool, error) {
 		return detectAutoscalerV2Enabled(ctx, client)
 	})
@@ -156,7 +251,7 @@ func runLogMonitorWithDeps(opts *Options, deps runnerDeps) error {
 	monitor, err := deps.newMonitor(
 		nodeIP,
 		opts,
-		logmonitor.NewRuntimePublisher(ctx, publishClient),
+		logmonitor.NewRuntimePublisher(ctx, client),
 		autoscalerV2,
 		os.Getenv(runtimeEnvLogToDriverEnvVar) == "1",
 	)
@@ -327,6 +422,20 @@ func defaultLoadNodeIPAddress(sessionDir string) (string, error) {
 	return payload.NodeIPAddress, nil
 }
 
+// errGCSClientConfig marks a connectGCSClient failure caused by local
+// misconfiguration (for example invalid TLS settings) rather than transient
+// GCS unavailability. connectGCSClientWithRetry reports such an error at once
+// instead of retrying: waiting cannot fix a bad configuration.
+var errGCSClientConfig = errors.New("gcs client configuration error")
+
+// permanentError marks a failure that retrying cannot fix. retryWithTimeout
+// returns it immediately instead of retrying until the deadline.
+type permanentError struct{ err error }
+
+func (e permanentError) Error() string { return e.err.Error() }
+
+func (e permanentError) Unwrap() error { return e.err }
+
 func retryWithTimeout[T any](
 	ctx context.Context,
 	timeout time.Duration,
@@ -340,6 +449,10 @@ func retryWithTimeout[T any](
 		value, err := op(ctx)
 		if err == nil {
 			return value, nil
+		}
+		var permanent permanentError
+		if errors.As(err, &permanent) {
+			return zero, permanent.err
 		}
 		lastErr = err
 		if time.Now().After(deadline) {
@@ -356,9 +469,29 @@ func retryWithTimeout[T any](
 	}
 }
 
-func connectGCSClientWithRetry(ctx context.Context, deps runnerDeps, opts gcs.ClientOptions) (gcs.Client, error) {
-	client, err := retryWithTimeout(ctx, deps.retryTimeout, deps.retryDelay, func(context.Context) (gcs.Client, error) {
-		return deps.connectGCSClient(opts)
+func connectGCSClientWithRetry(ctx context.Context, deps runnerDeps, opts gcs.ClientOptions) (gcsClient, error) {
+	// Resolve TLS/token options once, outside the retry loop, so the token and
+	// certificate files are not re-read on every attempt (each client
+	// construction would otherwise re-run DialOptionsFromEnv). A resolution
+	// failure is a configuration error, not a transient GCS unavailability, so
+	// it is not retried.
+	dialOpts, err := gcs.DialOptionsFromEnv()
+	if err != nil {
+		return nil, fmt.Errorf("connect gcs client: %w: %w", errGCSClientConfig, err)
+	}
+	opts.DialOptions = &dialOpts
+	// The pure-Go gRPC client dials via gcs.DialGCS: when ClientOptions.TimeoutMs
+	// is set it waits for the channel to become Ready within that bound, so a
+	// GCS that is still starting up fails this call and the retry loop retries
+	// until deps.retryTimeout elapses. With a zero timeout the dial is
+	// non-blocking and the autoscaler-v2 detection below becomes the effective
+	// readiness gate.
+	client, err := retryWithTimeout(ctx, deps.retryTimeout, deps.retryDelay, func(ctx context.Context) (gcsClient, error) {
+		client, err := deps.connectGCSClient(ctx, opts)
+		if err != nil && errors.Is(err, errGCSClientConfig) {
+			return nil, permanentError{err}
+		}
+		return client, err
 	})
 	if err != nil {
 		return nil, fmt.Errorf("connect gcs client: %w", err)
@@ -383,7 +516,7 @@ func detectAutoscalerV2EnabledWithRetry(ctx context.Context, deps runnerDeps, de
 	return enabled, nil
 }
 
-func detectAutoscalerV2Enabled(ctx context.Context, client gcs.Client) (bool, error) {
+func detectAutoscalerV2Enabled(ctx context.Context, client gcsClient) (bool, error) {
 	value, err := client.Get(ctx, autoscalerStateNamespace, autoscalerV2EnabledKey)
 	if err != nil {
 		if errors.Is(err, gcs.ErrKeyNotFound) {
