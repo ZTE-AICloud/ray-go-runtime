@@ -210,8 +210,9 @@ func buildConfig() (*agent.Config, error) {
 // resolveNodeID resolves this node's id from --node-id-hex, falling back to the
 // RAY_NODE_ID environment variable the raylet exports, mirroring the Python
 // agent (dashboard/agent.py reads only RAY_NODE_ID). A random id is a last
-// resort for standalone runs: such a node is never found in the GCS node table,
-// so is_head cannot be derived and stays false.
+// resort for standalone runs and requires an explicit --is-head: a freshly
+// minted id never appears in the GCS node table, so the is_head lookup cannot
+// resolve it and determineIsHead fails startup after its retries.
 func resolveNodeID() (ids.NodeID, error) {
 	hexStr := nodeIDHex
 	source := "--node-id-hex"

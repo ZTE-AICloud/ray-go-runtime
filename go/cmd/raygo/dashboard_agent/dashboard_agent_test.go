@@ -280,11 +280,17 @@ func TestMinimalModeLoadsNoModules(t *testing.T) {
 // the agent config and that no module is handed to the runner, matching the
 // Python agent's _init_non_minimal skip.
 func TestRunDashboardAgentMinimalSkipsModules(t *testing.T) {
+	origMinimal := minimal
+	origIsHead := isHeadFlag
+	t.Cleanup(func() {
+		minimal = origMinimal
+		isHeadFlag = origIsHead
+	})
+
 	args := append(testArgs(map[string]string{"log-dir": t.TempDir(), "is-head": "true"}), "--minimal")
 	if err := DashboardAgentCmd.ParseFlags(args); err != nil {
 		t.Fatalf("parse flags: %v", err)
 	}
-	t.Cleanup(func() { minimal = false })
 
 	origLoad := loadGCSClientFn
 	loadGCSClientFn = func(gcs.ClientOptions) (gcs.Client, error) {

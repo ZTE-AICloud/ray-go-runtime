@@ -150,6 +150,9 @@ func TestJobRoutesReachHandlers(t *testing.T) {
 		{http.MethodPost, "/api/job_agent/jobs/does-not-exist/stop"},
 		{http.MethodDelete, "/api/job_agent/jobs/does-not-exist"},
 		{http.MethodGet, "/api/job_agent/jobs/does-not-exist/logs"},
+		// The tail route resolves the job before accepting the upgrade, so a
+		// missing job is a plain-text 404 rather than a WebSocket handshake.
+		{http.MethodGet, "/api/job_agent/jobs/does-not-exist/logs/tail"},
 	} {
 		t.Run(tc.method+" "+tc.target, func(t *testing.T) {
 			rec := serveJobRequest(mux, tc.method, tc.target, "")
