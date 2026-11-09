@@ -464,9 +464,9 @@ func convertActorCreationOptionsToC(opts *submitter.ActorCreationOptions, actorD
 	// For an async actor with an unset max_concurrency we mirror Python's
 	// actor.py default (DEFAULT_MAX_CONCURRENCY_ASYNC = 1000) instead of 1.
 	// An async actor with max_concurrency=1 serializes its async methods: the
-	// worker's fiber rate limiter admits only one task at a time, so a
-	// long-running async method (e.g. JobSupervisor.run) blocks any subsequent
-	// async method (e.g. JobSupervisor.stop) from ever being scheduled. Python
+	// worker's fiber rate limiter admits a single task at a time, so a
+	// long-running async method (e.g. JobSupervisor.run) keeps a queued method
+	// (e.g. JobSupervisor.stop) from ever being admitted. Python
 	// defaults async actors to 1000 so such methods can interleave on the
 	// asyncio event loop.
 	switch {

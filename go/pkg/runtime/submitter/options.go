@@ -98,7 +98,9 @@ type ActorCreationOptions struct {
 	MaxTaskRetries int
 
 	// MaxConcurrency is the maximum number of concurrent calls for the actor.
-	// 0 means use the default concurrency, -1 means unlimited.
+	// 0 means use the default: 1000 for an async actor (matching Python's
+	// DEFAULT_MAX_CONCURRENCY_ASYNC), 1 (serialized) otherwise. -1 means
+	// unlimited.
 	MaxConcurrency int
 
 	// PlacementGroup is the placement group for this actor.
