@@ -52,6 +52,7 @@ import asyncio
 import os
 import queue
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -88,28 +89,59 @@ PROCESS_WAIT_TIMEOUT = 60
 # ---------------------------------------------------------------------------
 
 
-def find_pid_by_cmdline(substring):
-    """Return the pid whose cmdline contains substring, or None.
+def _read_cmdline(pid):
+    """Return the argv of a pid, or [] when it is gone or already a zombie."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            return [p.decode(errors="replace") for p in f.read().split(b"\0") if p]
+    except OSError:
+        return []
 
-    Uses a single `pgrep -f` snapshot instead of scanning /proc per call, which
-    matters because wait_for_pid and stop_cluster poll repeatedly.
+
+def find_pids_by_cmdline(subcommand, session_dir):
+    """Return the pids of this session's `raygo <subcommand>` processes.
+
+    Every component carries this cluster's session directory in its argv, so
+    identity is checked against /proc/<pid>/cmdline (`argv[0]` is raygo,
+    `argv[1]` is the subcommand, and a later argument embeds the session dir)
+    rather than trusting a machine-global `pgrep -f` match. The check keeps
+    the scan from tripping over raygo processes of unrelated clusters on the
+    same machine, and a zombie (empty cmdline) is never returned.
     """
     try:
         res = subprocess.run(
-            ["pgrep", "-f", substring], capture_output=True, text=True, timeout=5
+            ["pgrep", "-f", f"raygo {subcommand}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
-        if res.returncode != 0:
-            return None
-        pids = [int(p) for p in res.stdout.split()]
-        return pids[0] if pids else None
-    except (OSError, subprocess.SubprocessError, ValueError):
-        return None
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if res.returncode != 0:
+        return []
+    pids = []
+    for token in res.stdout.split():
+        try:
+            pid = int(token)
+        except ValueError:
+            continue
+        argv = _read_cmdline(pid)
+        if len(argv) > 1 and argv[0].endswith("raygo") and argv[1] == subcommand:
+            if any(session_dir in arg for arg in argv[2:]):
+                pids.append(pid)
+    return sorted(pids)
 
 
-def wait_for_pid(substring, timeout=PROCESS_WAIT_TIMEOUT):
+def find_pid_by_cmdline(subcommand, session_dir):
+    """Return the newest pid of this session's `raygo <subcommand>`, or None."""
+    pids = find_pids_by_cmdline(subcommand, session_dir)
+    return pids[-1] if pids else None
+
+
+def wait_for_pid(subcommand, session_dir, timeout=PROCESS_WAIT_TIMEOUT):
     deadline = time.time() + timeout
     while time.time() < deadline:
-        pid = find_pid_by_cmdline(substring)
+        pid = find_pid_by_cmdline(subcommand, session_dir)
         if pid is not None:
             return pid
         time.sleep(1)
@@ -231,11 +263,17 @@ def _cluster_env():
 
 
 def start_cluster():
-    """ray stop, then ray start --head with the three GO switches."""
+    """ray stop, then ray start --head with the three GO switches.
+
+    The stop is the lane's own cluster lifecycle: a component left behind by
+    an aborted earlier run belongs to another session and is deliberately not
+    swept (it would mean killing an unrelated cluster on the same machine); it
+    instead surfaces as a missing process for this session, so the assertions
+    fail loudly rather than reading a stale pid.
+    """
     print("[cluster] stopping any existing cluster...")
     subprocess.run(_ray_cli(["stop", "--force"]), check=False, capture_output=True)
     time.sleep(2)
-    _kill_leftover_components()
     env = _cluster_env()
     print("[cluster] ray start --head with GO switches...")
     res = subprocess.run(
@@ -254,41 +292,49 @@ def start_cluster():
         raise SystemExit(f"ray start failed: rc={res.returncode}")
 
 
-def stop_cluster():
+def stop_cluster(session_dir):
     print("[cluster] ray stop --force")
     subprocess.run(_ray_cli(["stop", "--force"]), check=False, capture_output=True)
-    _kill_leftover_components()
+    _kill_leftover_components(session_dir)
 
 
-def _kill_leftover_components():
-    # ray stop does not always reap the go component children (observed: a
-    # leftover raygo dashboard keeps binding the dashboard port and makes the
-    # next run fail with a WrongClusterID / port conflict). Kill any leftovers
-    # so repeated runs are self-cleaning.
-    for substring in (
-        "raygo dashboard",
-        "raygo log-monitor",
-        "raygo runtime-env-agent",
-    ):
+def _pid_alive(pid):
+    """False when the pid is gone or already a zombie (it can no longer run)."""
+    try:
+        with open(f"/proc/{pid}/stat", errors="replace") as f:
+            state = f.read().rsplit(")", 1)[1].split()[0]
+    except (OSError, IndexError):
+        return False
+    return state != "Z"
+
+
+def _terminate_pid(pid, label):
+    """SIGTERM, then SIGKILL, confirming the process died before returning."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            return
         deadline = time.time() + 10
+        while time.time() < deadline:
+            if not _pid_alive(pid):
+                return
+            time.sleep(0.2)
+    raise RuntimeError(f"{label} pid {pid} survived SIGTERM and SIGKILL")
+
+
+def _kill_leftover_components(session_dir):
+    # ray stop does not always reap the go component children (observed: a
+    # leftover raygo dashboard keeps binding the dashboard port). Only this
+    # session's processes are swept; another cluster's components on the same
+    # machine are left alone.
+    for subcommand in ("dashboard", "log-monitor", "runtime-env-agent"):
         while True:
-            pid = find_pid_by_cmdline(substring)
+            pid = find_pid_by_cmdline(subcommand, session_dir)
             if pid is None:
                 break
-            print(f"[cluster] killing leftover {substring!r} pid {pid}")
-            subprocess.run(["kill", str(pid)], check=False, capture_output=True)
-            if time.time() >= deadline:
-                # A process that ignores SIGTERM (stuck/zombie) would make the
-                # loop spin forever; escalate to SIGKILL and give up.
-                print(
-                    f"[cluster] WARNING: {substring!r} pid {pid} still alive after 10s; SIGKILL"
-                )
-                subprocess.run(
-                    ["kill", "-9", str(pid)], check=False, capture_output=True
-                )
-                time.sleep(0.5)
-                break
-            time.sleep(0.5)
+            print(f"[cluster] terminating leftover raygo {subcommand} pid {pid}")
+            _terminate_pid(pid, f"raygo {subcommand}")
 
 
 # ---------------------------------------------------------------------------
@@ -371,11 +417,11 @@ def collect_log_batches(gcs_addr, worker):
 # ---------------------------------------------------------------------------
 
 
-def check_log_monitor(logs_dir, gcs_addr):
+def check_log_monitor(session_dir, logs_dir, gcs_addr):
     print("\n===== go log_monitor =====")
-    pid = wait_for_pid("raygo log-monitor")
+    pid = wait_for_pid("log-monitor", session_dir)
     if pid is None:
-        raise AssertionError("log-monitor process not found")
+        raise AssertionError(f"log-monitor process of session {session_dir} not found")
     print(f"[ok] log-monitor process running (pid {pid})")
 
     maps = count_plugin_maps(pid)
@@ -458,11 +504,11 @@ def check_log_monitor(logs_dir, gcs_addr):
     print("[ok] log-monitor logs clean (no panic/fatal)")
 
 
-def check_dashboard():
+def check_dashboard(session_dir):
     print("\n===== go dashboard =====")
-    pid = wait_for_pid("raygo dashboard")
+    pid = wait_for_pid("dashboard", session_dir)
     if pid is None:
-        raise AssertionError("dashboard process not found")
+        raise AssertionError(f"dashboard process of session {session_dir} not found")
     print(f"[ok] dashboard process running (pid {pid})")
 
     # HTTP up and core APIs respond.
@@ -534,13 +580,14 @@ def run(
     if not no_start:
         start_cluster()
     logs_dir = _session_logs_dir()
+    session_dir = os.path.dirname(logs_dir)
     print(f"[info] session logs dir: {logs_dir}")
 
     failed = []
     try:
         if component in ("all", "log_monitor"):
             try:
-                check_log_monitor(logs_dir, ray_address)
+                check_log_monitor(session_dir, logs_dir, ray_address)
             except AssertionError as e:
                 print(f"[FAIL] log_monitor: {e}")
                 failed.append(("log_monitor", str(e)))
@@ -548,7 +595,7 @@ def run(
                 print("[PASS] log_monitor")
         if component in ("all", "dashboard"):
             try:
-                check_dashboard()
+                check_dashboard(session_dir)
             except AssertionError as e:
                 print(f"[FAIL] dashboard: {e}")
                 failed.append(("dashboard", str(e)))
@@ -557,7 +604,7 @@ def run(
     finally:
         # --no-start reuses a user-owned cluster; never tear it down implicitly.
         if not keep_cluster and not no_start:
-            stop_cluster()
+            stop_cluster(session_dir)
     return failed
 
 
