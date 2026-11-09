@@ -26,6 +26,7 @@ go_library(
     visibility = ["//go:__subpackages__"],
     deps = [
         "//go/pkg/gcs",
+        "//go/pkg/log",
     ],
 )
 

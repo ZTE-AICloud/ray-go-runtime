@@ -27,6 +27,7 @@ import (
 	"sync"
 
 	"github.com/ray-project/ray/go/pkg/gcs"
+	"github.com/ray-project/ray/go/pkg/log"
 )
 
 // Header/cookie names aligned with python/ray/_private/authentication/authentication_constants.py.
@@ -87,12 +88,24 @@ func RequestToken() (string, bool) {
 	if !TokenAuthEnabled() {
 		return "", false
 	}
-	if token := strings.TrimSpace(os.Getenv(envAuthToken)); token != "" {
-		return token, true
+	if raw, set := os.LookupEnv(envAuthToken); set && raw != "" {
+		// C++ treats a non-empty RAY_AUTH_TOKEN as authoritative and trims it; a
+		// whitespace-only value trims to empty and stops the lookup instead of
+		// falling through to the later sources.
+		token := strings.TrimSpace(raw)
+		if token == "" {
+			log.Log.V(1).Info("RAY_AUTH_TOKEN is set but holds only whitespace; no token is attached")
+		}
+		return token, token != ""
 	}
 	if path := os.Getenv(envAuthTokenPath); path != "" {
 		token, err := gcs.ReadTokenFile(path)
 		if err != nil || token == "" {
+			// Mirrors the C++ loader's abort message observability without the
+			// abort: the broken path stops the lookup. V(1) because RequestToken
+			// runs on every report request.
+			log.Log.V(1).Info("Token authentication is enabled but RAY_AUTH_TOKEN_PATH yields no token",
+				"path", path)
 			return "", false
 		}
 		return token, true
@@ -107,6 +120,8 @@ func RequestToken() (string, bool) {
 			return token, true
 		}
 	}
+	log.Log.V(1).Info("Token authentication is enabled but no token was found; " +
+		"requests to authenticated clusters will fail")
 	return "", false
 }
 

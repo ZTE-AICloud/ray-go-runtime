@@ -76,9 +76,23 @@ func TestRequestTokenFromPathFile(t *testing.T) {
 func TestRequestTokenPathUnreadableIsHardStop(t *testing.T) {
 	clearTokenEnv(t)
 	t.Setenv(envAuthTokenPath, filepath.Join(t.TempDir(), "missing"))
-	writeDefaultToken(t, t.TempDir(), "default-token\n")
+	// The fixture must live where the accessor looks (the HOME set by
+	// clearTokenEnv), otherwise the test would pass even without the hard stop.
+	writeDefaultToken(t, os.Getenv("HOME"), "default-token\n")
 	if token, ok := RequestToken(); ok {
 		t.Errorf("RequestToken = (%q, true), want no token (the broken path is a hard stop)", token)
+	}
+}
+
+// TestRequestTokenWhitespaceOnlyEnvIsHardStop checks the C++ trim-and-stop
+// semantics: a whitespace-only RAY_AUTH_TOKEN trims to empty and stops the
+// lookup instead of falling through to the default path.
+func TestRequestTokenWhitespaceOnlyEnvIsHardStop(t *testing.T) {
+	clearTokenEnv(t)
+	t.Setenv(envAuthToken, " \t\n ")
+	writeDefaultToken(t, os.Getenv("HOME"), "default-token\n")
+	if token, ok := RequestToken(); ok {
+		t.Errorf("RequestToken = (%q, true), want no token (a whitespace-only env is a hard stop)", token)
 	}
 }
 
