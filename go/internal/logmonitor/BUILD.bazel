@@ -18,6 +18,7 @@ go_library(
     name = "logmonitor",
     srcs = [
         "file_info.go",
+        "garbage_collector.go",
         "monitor.go",
         "patterns.go",
         "process.go",
@@ -28,6 +29,7 @@ go_library(
     importpath = "github.com/ray-project/ray/go/internal/logmonitor",
     visibility = ["//visibility:public"],
     deps = [
+        "//go/internal/common",
         "//go/pkg/gcs",
         "//go/pkg/log",
     ],
@@ -36,6 +38,7 @@ go_library(
 go_test(
     name = "logmonitor_test",
     srcs = [
+        "garbage_collector_test.go",
         "integration_monitor_test.go",
         "monitor_lifecycle_test.go",
         "monitor_read_test.go",

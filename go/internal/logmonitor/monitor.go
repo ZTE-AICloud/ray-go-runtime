@@ -45,6 +45,7 @@ type Monitor struct {
 	lastFilenameUpdateTime time.Time
 	lastPublishErrLog      time.Time
 	isProcAlive            func(pid int) bool
+	gc                     *GarbageCollector
 	sleep                  func(time.Duration)
 }
 
@@ -70,7 +71,7 @@ func New(ip, logsDir string, publisher Publisher) (*Monitor, error) {
 		return nil, fmt.Errorf("create old log directory: %w", err)
 	}
 
-	return &Monitor{
+	m := &Monitor{
 		ip:                 ip,
 		logsDir:            logsDir,
 		publisher:          publisher,
@@ -84,7 +85,9 @@ func New(ip, logsDir string, publisher Publisher) (*Monitor, error) {
 		maxBatchBytes:      defaultMaxBatchBytes,
 		isProcAlive:        defaultIsProcAlive,
 		sleep:              time.Sleep,
-	}, nil
+	}
+	m.gc = NewGarbageCollector(m.logsDir, m.isProcAlive, m.removeTrackedFile)
+	return m, nil
 }
 
 // NewWithConfig creates a Monitor with runtime configuration overrides.
@@ -131,6 +134,8 @@ func (m *Monitor) Run(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		// GC is always created in New(), so no nil guard is needed.
+		m.gc.MaybeCollect()
 		if !published {
 			m.sleep(defaultIdleSleep)
 		}
@@ -267,6 +272,33 @@ func (m *Monitor) closeAllFiles() error {
 	m.canOpenMoreFiles = true
 	logger.Info("recycled open log files", "closed_count", len(reopenedClosed))
 	return nil
+}
+
+// removeTrackedFile removes path from the tracking structures after the GC has
+// deleted the file on disk. It is only invoked by the GC's onFileDeleted
+// callback, which runs in the Run loop after publishing (never inside a range
+// loop over openFiles/closedFiles, so slice mutation here is safe).
+func (m *Monitor) removeTrackedFile(path string) {
+	delete(m.tracked, path)
+
+	for i := 0; i < len(m.openFiles); i++ {
+		if m.openFiles[i].filename != path {
+			continue
+		}
+		if m.openFiles[i].fileHandle != nil {
+			_ = m.openFiles[i].fileHandle.Close()
+		}
+		m.openFiles = append(m.openFiles[:i], m.openFiles[i+1:]...)
+		i--
+	}
+
+	for i := 0; i < len(m.closedFiles); i++ {
+		if m.closedFiles[i].filename != path {
+			continue
+		}
+		m.closedFiles = append(m.closedFiles[:i], m.closedFiles[i+1:]...)
+		i--
+	}
 }
 
 func (m *Monitor) writePythonStyleLog(line int, message string) {
