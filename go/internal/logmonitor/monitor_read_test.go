@@ -16,6 +16,7 @@ package logmonitor
 
 import (
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -209,6 +210,65 @@ func TestCheckLogFilesAndPublishUpdatesTruncatesLongLine(t *testing.T) {
 	}
 	if got := publisher.batches[0].Lines[1]; got != "short" {
 		t.Fatalf("second line = %q, want %q", got, "short")
+	}
+}
+
+func TestCheckLogFilesAndPublishUpdatesAccessViolation(t *testing.T) {
+	tests := []struct {
+		name      string
+		contents  string
+		wantLines []string
+	}{
+		{
+			name:      "exact match skips crash stack line",
+			contents:  windowsAccessViolationLine + "\ncrash stack line\nnormal line\n",
+			wantLines: []string{"normal line"},
+		},
+		{
+			name:      "trailing whitespace still matches",
+			contents:  windowsAccessViolationLine + "  \ncrash stack line\nnormal line\n",
+			wantLines: []string{"normal line"},
+		},
+		{
+			name:      "extra content still matches",
+			contents:  windowsAccessViolationLine + " at 0x00007fff\ncrash stack line\nnormal line\n",
+			wantLines: []string{"normal line"},
+		},
+		{
+			name:      "normal line is published",
+			contents:  "not an access violation\n",
+			wantLines: []string{"not an access violation"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logsDir := t.TempDir()
+			publisher := &recordingPublisher{}
+			createLogFile(t, logsDir, "worker-6df6d5dd-01000000-47660.out", tt.contents)
+
+			m, err := New("127.0.0.1", logsDir, publisher)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			if err := m.updateLogFilenames(); err != nil {
+				t.Fatalf("updateLogFilenames() error = %v", err)
+			}
+			if err := m.openClosedFiles(); err != nil {
+				t.Fatalf("openClosedFiles() error = %v", err)
+			}
+			if _, err := m.checkLogFilesAndPublishUpdates(); err != nil {
+				t.Fatalf("checkLogFilesAndPublishUpdates() error = %v", err)
+			}
+
+			var got []string
+			for _, batch := range publisher.batches {
+				got = append(got, batch.Lines...)
+			}
+			if !reflect.DeepEqual(got, tt.wantLines) {
+				t.Fatalf("published lines = %#v, want %#v", got, tt.wantLines)
+			}
+		})
 	}
 }
 

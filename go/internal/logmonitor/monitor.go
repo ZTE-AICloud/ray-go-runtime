@@ -405,7 +405,7 @@ func (m *Monitor) checkLogFilesAndPublishUpdates() (bool, error) {
 				fileInfo.taskName = strings.TrimPrefix(line, logPrefixTaskName)
 			case strings.HasPrefix(line, logPrefixJobID):
 				fileInfo.jobID = strings.TrimPrefix(line, logPrefixJobID)
-			case line == windowsAccessViolationLine:
+			case strings.HasPrefix(line, windowsAccessViolationLine):
 				_, _, _ = readCappedLine(reader, m.maxLineSize)
 			case line == "":
 				pending = append(pending, "")

@@ -79,6 +79,9 @@ func parseWorkerFilename(path string) (string, *int, bool) {
 	if err != nil {
 		return "", nil, false
 	}
+	if pidValue <= 0 || pidValue >= 1000000 {
+		return "", nil, false
+	}
 
 	pid := pidValue
 	return match[1], &pid, true
@@ -116,7 +119,7 @@ func orderedLogPaths(logsDir string, autoscalerV2Enabled bool, runtimeEnvToDrive
 	}
 	appendMatches("gcs_server*.err")
 	if tpuDirExists {
-		tpuEntries, err := readdirPaths(filepath.Join(logsDir, "tpu_logs"))
+		tpuEntries, err := readdirPathsRecursive(filepath.Join(logsDir, "tpu_logs"), 32)
 		if err != nil {
 			return nil, err
 		}
@@ -148,6 +151,62 @@ func readdirPaths(dir string) ([]string, error) {
 	paths := make([]string, 0, len(infos))
 	for _, info := range infos {
 		paths = append(paths, filepath.Join(dir, info.Name()))
+	}
+	return paths, nil
+}
+
+// readdirPathsRecursive returns the paths of all regular files reachable from
+// dir, bounded by maxDepth levels of directory descent. Symlinks are followed
+// (stat semantics): a symlink to a directory is descended into, a symlink to a
+// regular file is collected, and a broken symlink or symlink loop (stat
+// returns ELOOP) is skipped. A nonexistent dir returns an error, matching
+// readdirPaths.
+func readdirPathsRecursive(dir string, maxDepth int) ([]string, error) {
+	return readdirPathsRecursiveDepth(dir, 0, maxDepth)
+}
+
+func readdirPathsRecursiveDepth(dir string, depth, maxDepth int) ([]string, error) {
+	if depth >= maxDepth {
+		return []string{}, nil
+	}
+
+	// os.ReadDir builds entries from d_type where available, avoiding the
+	// per-entry stat that a Readdir+os.Stat pair would otherwise perform.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	paths := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		fullPath := filepath.Join(dir, entry.Name())
+		switch {
+		case entry.Type().IsRegular():
+			// Regular file: collected directly without a stat.
+			paths = append(paths, fullPath)
+		case entry.Type().IsDir():
+			// Directory: recurse.
+			sub, err := readdirPathsRecursiveDepth(fullPath, depth+1, maxDepth)
+			if err == nil {
+				paths = append(paths, sub...)
+			}
+		default:
+			// Symlink or unknown type: stat (follows the link) to decide
+			// whether the target is a directory or a regular file. A broken
+			// symlink or symlink loop (stat returns ELOOP) is skipped.
+			st, err := os.Stat(fullPath)
+			if err != nil {
+				continue
+			}
+			if st.IsDir() {
+				sub, err := readdirPathsRecursiveDepth(fullPath, depth+1, maxDepth)
+				if err == nil {
+					paths = append(paths, sub...)
+				}
+			} else if st.Mode().IsRegular() {
+				paths = append(paths, fullPath)
+			}
+		}
 	}
 	return paths, nil
 }
