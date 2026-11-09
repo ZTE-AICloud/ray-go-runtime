@@ -92,6 +92,40 @@ func TestFastTailLastNLinesEmptyFile(t *testing.T) {
 	assert.Equal(t, "", fastTailLastNLines(path, 5, 10000))
 }
 
+// TestFastTailLastNLinesBlockBoundary pins the backward scan's position
+// arithmetic against the 8192-byte block size: a block that starts inside a
+// line must still yield that line whole. A short read advanced by the requested
+// block size instead of the bytes actually read would silently drop the
+// block-leading bytes, so the scan now fills each block with io.ReadFull.
+func TestFastTailLastNLinesBlockBoundary(t *testing.T) {
+	const blockSize = 8192 // fastTailLastNLines' block size
+	lineA := strings.Repeat("a", 5000) + "\n"
+	lineB := strings.Repeat("b", 3000) + "\n"
+	lineC := strings.Repeat("c", 3000) + "\n"
+	content := lineA + lineB + lineC
+	require.Greater(t, len(content), blockSize)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "boundary.log")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+
+	assert.Equal(t, lineC, fastTailLastNLines(path, 1, 100000))
+	assert.Equal(t, lineB+lineC, fastTailLastNLines(path, 2, 100000))
+	assert.Equal(t, content, fastTailLastNLines(path, 3, 100000))
+
+	// Sizes exactly on and just past a block boundary.
+	exact := strings.Repeat("x", blockSize-1) + "\n"
+	require.Equal(t, blockSize, len(exact))
+	require.NoError(t, os.WriteFile(path, []byte(exact), 0o644))
+	assert.Equal(t, exact, fastTailLastNLines(path, 1, 100000))
+
+	over := exact + "tail\n"
+	require.Equal(t, blockSize+len("tail\n"), len(over))
+	require.NoError(t, os.WriteFile(path, []byte(over), 0o644))
+	assert.Equal(t, "tail\n", fastTailLastNLines(path, 1, 100000))
+	assert.Equal(t, over, fastTailLastNLines(path, 2, 100000))
+}
+
 func TestValidateJobSubmitRequest(t *testing.T) {
 	assert.NoError(t, validateJobSubmitRequest(map[string]interface{}{}))
 	assert.NoError(t, validateJobSubmitRequest(map[string]interface{}{
@@ -134,6 +168,13 @@ func TestValidateJobSubmitRequest(t *testing.T) {
 	err = validateJobSubmitRequest(map[string]interface{}{"entrypoint_resources": map[string]interface{}{"r": "x"}})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "entrypoint_resources values must be numbers")
+
+	// entrypoint_memory must be integral: JSON numbers decode to float64, and a
+	// fractional value would otherwise be silently truncated by submitJob.
+	err = validateJobSubmitRequest(map[string]interface{}{"entrypoint_memory": 1073741824.5})
+	require.Error(t, err)
+	assert.EqualError(t, err, "entrypoint_memory must be an integer, got float")
+	assert.NoError(t, validateJobSubmitRequest(map[string]interface{}{"entrypoint_memory": 1073741824.0}))
 }
 
 func TestJSONTypeName(t *testing.T) {

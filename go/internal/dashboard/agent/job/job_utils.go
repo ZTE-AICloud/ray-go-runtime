@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"math/big"
 	"net/http"
 	"os"
@@ -224,16 +225,23 @@ func fastTailLastNLines(path string, numLines int, maxChars int) string {
 		if readSize > position {
 			readSize = position
 		}
-		position -= readSize
-		if _, err := f.Seek(position, 0); err != nil {
+		start := position - readSize
+		if _, err := f.Seek(start, io.SeekStart); err != nil {
 			break
 		}
 		chunk := make([]byte, readSize)
-		if _, err := f.Read(chunk); err != nil {
+		// ReadFull keeps a short Read from silently dropping the block-leading
+		// bytes: the scan only advances past bytes the file actually returned.
+		n, err := io.ReadFull(f, chunk)
+		if n == 0 {
 			break
 		}
-		newlinesFound += bytes.Count(chunk, []byte("\n"))
-		chunks = append(chunk, chunks...)
+		chunks = append(chunk[:n], chunks...)
+		newlinesFound += bytes.Count(chunk[:n], []byte("\n"))
+		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+			break
+		}
+		position = start
 	}
 
 	text := string(chunks)
@@ -425,7 +433,11 @@ func validateJobSubmitRequest(raw map[string]interface{}) error {
 		}
 	}
 	if v, ok := raw["entrypoint_memory"]; ok {
-		if _, isNum := v.(float64); !isNum {
+		num, isNum := v.(float64)
+		if !isNum {
+			return &valueError{msg: fmt.Sprintf("entrypoint_memory must be an integer, got %s", jsonTypeName(v))}
+		}
+		if num != math.Trunc(num) {
 			return &valueError{msg: fmt.Sprintf("entrypoint_memory must be an integer, got %s", jsonTypeName(v))}
 		}
 	}
