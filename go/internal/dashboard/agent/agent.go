@@ -38,7 +38,7 @@ type Config struct {
 	IsHead bool
 	// Minimal disables both servers, mirroring the Python agent's --minimal
 	// mode, which skips _init_non_minimal and therefore leaves self.server and
-	// self.http_server as None (agent.py:94-95).
+	// self.http_server as None in agent.py.
 	Minimal bool
 	// GCSAddress is the host:port of the GCS server.
 	GCSAddress string

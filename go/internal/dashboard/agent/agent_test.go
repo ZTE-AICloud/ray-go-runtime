@@ -836,16 +836,18 @@ func TestAgentHTTPRequiresTokenOutsidePublicPaths(t *testing.T) {
 
 // TestAgentHTTPPreflightMatchesAiohttpCORS verifies the router answers CORS
 // preflights only for registered routes, with the aiohttp_cors headers, and
-// that the production chain still rejects browser-origin traffic (the agent's
-// browser-block middleware runs before the router, as in the Python agent).
+// that the production chain answers a browser-origin preflight before the
+// router: with token auth disabled the browser block rejects it with 403, and
+// in token mode the token middleware, which is outermost, rejects it with 401.
 func TestAgentHTTPPreflightMatchesAiohttpCORS(t *testing.T) {
 	mod := healthRouteModule()
+	preflightHeaders := map[string]string{
+		"Origin":                        "http://dashboard",
+		"Access-Control-Request-Method": http.MethodGet,
+	}
 
 	t.Run("registered route", func(t *testing.T) {
-		rec := doRequest(t, newTestRouter(t, mod), http.MethodOptions, "http://agent/api/jobs", map[string]string{
-			"Origin":                        "http://dashboard",
-			"Access-Control-Request-Method": http.MethodGet,
-		})
+		rec := doRequest(t, newTestRouter(t, mod), http.MethodOptions, "http://agent/api/jobs", preflightHeaders)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("preflight = %d, want 200", rec.Code)
 		}
@@ -861,10 +863,7 @@ func TestAgentHTTPPreflightMatchesAiohttpCORS(t *testing.T) {
 	})
 
 	t.Run("unregistered route", func(t *testing.T) {
-		rec := doRequest(t, newTestRouter(t, mod), http.MethodOptions, "http://agent/api/unknown", map[string]string{
-			"Origin":                        "http://dashboard",
-			"Access-Control-Request-Method": http.MethodGet,
-		})
+		rec := doRequest(t, newTestRouter(t, mod), http.MethodOptions, "http://agent/api/unknown", preflightHeaders)
 		if rec.Code != http.StatusNotFound {
 			t.Fatalf("preflight on an unregistered route = %d, want 404", rec.Code)
 		}
@@ -873,7 +872,7 @@ func TestAgentHTTPPreflightMatchesAiohttpCORS(t *testing.T) {
 		}
 	})
 
-	t.Run("browser origin is blocked by the chain", func(t *testing.T) {
+	t.Run("browser origin is blocked by the chain with auth disabled", func(t *testing.T) {
 		t.Setenv("RAY_AUTH_MODE", "")
 		rec := doRequest(t, newAgentHandler(t, mod), http.MethodGet, "http://agent/api/jobs", map[string]string{
 			"Origin": "http://dashboard",
@@ -883,6 +882,18 @@ func TestAgentHTTPPreflightMatchesAiohttpCORS(t *testing.T) {
 		}
 		if got := rec.Body.String(); got != "Browser requests not allowed." {
 			t.Errorf("body = %q, want the browser-block text", got)
+		}
+	})
+
+	t.Run("preflight is answered by token auth first in token mode", func(t *testing.T) {
+		t.Setenv("RAY_AUTH_MODE", "token")
+		t.Setenv("RAY_AUTH_TOKEN", "test-token")
+		rec := doRequest(t, newAgentHandler(t, mod), http.MethodOptions, "http://agent/api/jobs", preflightHeaders)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("preflight in token mode = %d, want 401", rec.Code)
+		}
+		if got := rec.Body.String(); got != "Unauthorized: Missing authentication token" {
+			t.Errorf("body = %q, want the missing-token text", got)
 		}
 	})
 }
@@ -946,13 +957,22 @@ func TestAgentHTTPPathEscapingMatchesAiohttp(t *testing.T) {
 // in-container readiness probe dials localhost), that both listeners serve the
 // same handler, and that shutdown releases both. The listen port is injected as
 // 0, so the loopback listener is expected to share the node-ip listener's
-// actually bound port rather than the configured 0.
+// actually bound port rather than the configured 0. A localhost or empty node
+// IP binds only the single listener.
 func TestHTTPServerLoopbackListener(t *testing.T) {
 	t.Setenv("RAY_AUTH_MODE", "")
 	srv, err := newHTTPServer(Config{NodeIP: "127.0.0.2", ListenPort: 0}, []Module{healthRouteModule()})
 	if err != nil {
 		t.Fatalf("newHTTPServer: %v", err)
 	}
+	// Release both sockets if the test aborts before its explicit shutdown.
+	t.Cleanup(func() {
+		_ = srv.shutdown(context.Background())
+		_ = srv.listener.Close()
+		if srv.loopbackListener != nil {
+			_ = srv.loopbackListener.Close()
+		}
+	})
 	if srv.loopbackListener == nil {
 		_ = srv.listener.Close()
 		t.Fatal("no loopback listener bound for a non-localhost node IP")
@@ -1012,6 +1032,20 @@ func TestHTTPServerLoopbackListener(t *testing.T) {
 	defer local.listener.Close()
 	if local.loopbackListener != nil {
 		t.Errorf("loopback listener bound for the loopback node IP %s", local.listener.Addr())
+	}
+
+	// An empty node IP falls back to a wildcard bind that already covers the
+	// loopback address, so no second listener is created.
+	wildcard, err := newHTTPServer(Config{ListenPort: 0}, nil)
+	if err != nil {
+		t.Fatalf("newHTTPServer for an empty node IP: %v", err)
+	}
+	defer wildcard.listener.Close()
+	if ip := wildcard.listener.Addr().(*net.TCPAddr).IP; !ip.IsUnspecified() {
+		t.Errorf("empty node IP bound %s, want the wildcard address", ip)
+	}
+	if wildcard.loopbackListener != nil {
+		t.Errorf("loopback listener bound for an empty node IP: %s", wildcard.loopbackListener.Addr())
 	}
 }
 
