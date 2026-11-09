@@ -73,14 +73,19 @@ func (f *logFileInfo) reopenIfNecessary() error {
 	}
 
 	needReopen := !os.SameFile(currentInfo, openInfo)
-	// Detect in-place truncation robustly: compare against both the consumed
-	// position (filePosition) and the OS read offset. The buffered reader may
-	// hold bytes between the consumed position and the OS offset, so a
-	// truncation to a size in between the two would be missed if only the
-	// consumed position were compared, and stale buffered bytes would then be
-	// published as new log lines.
+	// Detect in-place truncation against three signals, each covering a case
+	// the others miss:
+	//   - filePosition: the file shrank below what was already published.
+	//   - osOffset: the buffered reader may hold bytes between the consumed
+	//     position and the OS offset, so a truncation landing in that gap would
+	//     leave stale buffered bytes to be published as new log lines.
+	//   - sizeWhenLastOpened: the file can be truncated to any size below the
+	//     size last observed at open, even when only a little has been read and
+	//     the OS offset is still small (matches log_monitor.py).
 	osOffset, _ := f.fileHandle.Seek(0, 1)
-	rewindToStart := currentInfo.Size() < f.filePosition || currentInfo.Size() < osOffset
+	rewindToStart := currentInfo.Size() < f.filePosition ||
+		currentInfo.Size() < osOffset ||
+		currentInfo.Size() < f.sizeWhenLastOpened
 	if needReopen || rewindToStart {
 		_ = f.fileHandle.Close()
 		f.fileHandle = nil
