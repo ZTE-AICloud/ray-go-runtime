@@ -94,6 +94,10 @@ type metricsExporter interface {
 // registration, mirroring Python agent.py, which does not fall back; a gRPC
 // bind failure remains fatal.
 func Run(ctx context.Context, cfg Config, mods []Module) error {
+	if cfg.Minimal {
+		return runMinimal(ctx, cfg, mods)
+	}
+
 	httpSrv, httpErr := newHTTPServer(cfg, mods)
 	if httpErr != nil {
 		// Python keeps the agent alive with the HTTP service disabled in this
@@ -188,6 +192,26 @@ func Run(ctx context.Context, cfg Config, mods []Module) error {
 		shutdownServers(httpSrv, grpcSrv)
 		return err
 	}
+}
+
+// runMinimal runs the agent without binding either server, mirroring the
+// Python agent's --minimal mode: _init_non_minimal is skipped, so no HTTP or
+// gRPC service exists, and the agent registers the not-in-use sentinel ports
+// (-1) before blocking until shutdown (agent.py:94-95, 206-238).
+func runMinimal(ctx context.Context, cfg Config, mods []Module) error {
+	for _, m := range mods {
+		if err := m.Start(ctx); err != nil {
+			return fmt.Errorf("start module: %w", err)
+		}
+	}
+
+	if err := registerAgentToGCS(ctx, cfg, -1, -1); err != nil {
+		return fmt.Errorf("register agent to GCS: %w", err)
+	}
+
+	<-ctx.Done()
+	log.Log.V(0).Info("dashboard agent shutting down")
+	return nil
 }
 
 // shutdownServers gracefully shuts down both servers, best-effort, and always
