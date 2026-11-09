@@ -110,8 +110,11 @@ func (l *authTokenLoader) expectedToken() string {
 	return l.cached
 }
 
-// readTokenFileOrEmpty returns the first non-empty trimmed line of path, or ""
-// when the file cannot be read or holds no token.
+// readTokenFileOrEmpty returns the first NON-empty trimmed line of path, or ""
+// when the file cannot be read or holds no token. Note: gcs.ReadTokenFile
+// skips leading blank lines, unlike the reference implementation's strict
+// first-line read, so a leading blank line still yields the token here
+// (deliberate preservation of the OSS behavior).
 func readTokenFileOrEmpty(path string) string {
 	token, err := gcs.ReadTokenFile(path)
 	if err != nil {

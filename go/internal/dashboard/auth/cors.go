@@ -15,6 +15,9 @@
 package auth
 
 import (
+	"bufio"
+	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -88,6 +91,21 @@ func (c *corsResponseWriter) Flush() {
 		}
 		f.Flush()
 	}
+}
+
+// Unwrap returns the wrapped ResponseWriter so http.ResponseController and
+// libraries that resolve the underlying writer (e.g. coder/websocket) can
+// reach it.
+func (c *corsResponseWriter) Unwrap() http.ResponseWriter { return c.ResponseWriter }
+
+// Hijack forwards the WebSocket upgrade to the wrapped ResponseWriter so
+// upgrades behind this middleware are not rejected with a 501.
+func (c *corsResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hj, ok := c.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("underlying ResponseWriter does not implement http.Hijacker")
+	}
+	return hj.Hijack()
 }
 
 // apply adds the CORS headers for the request origin, exposing every

@@ -15,9 +15,14 @@
 package auth
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/coder/websocket"
 )
 
 func alwaysCORS(*http.Request) bool { return true }
@@ -235,6 +240,61 @@ func TestServePreflightWithoutRequestHeaders(t *testing.T) {
 	}
 	if got := rec.Header().Get(headerAllowHeaders); got != "" {
 		t.Fatalf("Allow-Headers = %q, want empty when no headers are requested", got)
+	}
+}
+
+// TestWithCORSAllowsWebSocketHijack verifies a WebSocket upgrade works through
+// the CORS wrapper, both when CORS is enabled and when it is disabled (the
+// wrapper is installed unconditionally). The wrapper must forward http.Hijacker
+// and Unwrap, otherwise websocket.Accept fails and returns 501.
+func TestWithCORSAllowsWebSocketHijack(t *testing.T) {
+	cases := []struct {
+		name    string
+		enabled func(*http.Request) bool
+	}{
+		{"enabled", alwaysCORS},
+		{"disabled", neverCORS},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			echo := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := websocket.Accept(w, r, nil)
+				if err != nil {
+					t.Errorf("websocket.Accept through the CORS wrapper: %v", err)
+					return
+				}
+				defer conn.Close(websocket.StatusNormalClosure, "")
+				_, data, err := conn.Read(r.Context())
+				if err != nil {
+					return
+				}
+				_ = conn.Write(r.Context(), websocket.MessageText, data)
+			})
+			srv := httptest.NewServer(WithCORS(c.enabled, echo))
+			defer srv.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			conn, resp, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+			if err != nil {
+				status := ""
+				if resp != nil {
+					status = resp.Status
+				}
+				t.Fatalf("dial through the CORS wrapper: %v (status %q)", err, status)
+			}
+			defer conn.CloseNow()
+			if err := conn.Write(ctx, websocket.MessageText, []byte("ping")); err != nil {
+				t.Fatal(err)
+			}
+			typ, data, err := conn.Read(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if typ != websocket.MessageText || string(data) != "ping" {
+				t.Fatalf("echo = %v %q, want text %q", typ, data, "ping")
+			}
+		})
 	}
 }
 
