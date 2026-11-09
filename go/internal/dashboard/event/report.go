@@ -28,14 +28,18 @@ import (
 
 	"github.com/ray-project/ray/go/internal/common"
 	"github.com/ray-project/ray/go/internal/dashboard/agent"
+	"github.com/ray-project/ray/go/internal/dashboard/auth"
+	"github.com/ray-project/ray/go/pkg/gcs"
 	"github.com/ray-project/ray/go/pkg/log"
 )
 
 // resolveDashboardAddress lazily gets the head dashboard HTTP address from GCS
 // InternalKV, retrying until found; once resolved the address is cached.
-func (e *EventAgent) resolveDashboardAddress(ctx context.Context) (string, error) {
+// forceRefresh bypasses the cache and re-reads the address, which the report
+// loop uses after a failed report so a restarted or moved head is picked up.
+func (e *EventAgent) resolveDashboardAddress(ctx context.Context, forceRefresh bool) (string, error) {
 	for {
-		if e.addressResolved.Load() {
+		if e.addressResolved.Load() && !forceRefresh {
 			addr, _ := e.dashboardHTTPAddress.Load().(string)
 			return addr, nil
 		}
@@ -91,7 +95,7 @@ func (e *EventAgent) reportEvents(ctx context.Context) error {
 // exhaustion drops the batch with a truncated error log. It reports
 // errQueueClosed when the queue is closed and nil otherwise.
 func (e *EventAgent) reportBatch(ctx context.Context) error {
-	addr, err := e.resolveDashboardAddress(ctx)
+	addr, err := e.resolveDashboardAddress(ctx, false)
 	if err != nil {
 		return nil
 	}
@@ -115,6 +119,10 @@ func (e *EventAgent) reportBatch(ctx context.Context) error {
 			msg = dataStr[:logErrorEventStringLengthLimit] + "..."
 		}
 		log.Log.Error(err, "Report event failed", "data", msg)
+		// Drop the cached address so the next attempt re-resolves it: the head
+		// may have restarted or moved, in which case retrying the stale address
+		// would keep failing until the agent restarts.
+		e.addressResolved.Store(false)
 		return nil
 	}
 	e.totalRequestSent.Add(1)
@@ -203,13 +211,11 @@ func (e *EventAgent) postOnce(ctx context.Context, addr string, body []byte) err
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	// /report_events is not a public head path, so on RAY_AUTH_MODE=token
-	// clusters every report needs the bearer token (python event_agent sends
+	// /report_events is not a public head path, so on authenticated clusters
+	// every report needs the bearer token (python event_agent sends
 	// get_auth_headers_if_auth_enabled({}) on the report request).
-	if os.Getenv("RAY_AUTH_MODE") == "token" {
-		if token := reportAuthToken(); token != "" {
-			req.Header.Set("Authorization", "Bearer "+token)
-		}
+	for key, value := range authHeaders() {
+		req.Header.Set(key, value)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -225,32 +231,37 @@ func (e *EventAgent) postOnce(ctx context.Context, addr string, body []byte) err
 	return nil
 }
 
-// reportAuthToken returns the bearer token for report requests, mirroring the
-// head's token precedence (RAY_AUTH_TOKEN env, then the first line of
-// RAY_AUTH_TOKEN_PATH). Empty when neither is set.
-func reportAuthToken() string {
-	if env := os.Getenv("RAY_AUTH_TOKEN"); env != "" {
-		return env
+// authHeaders returns the Authorization header for report requests when token
+// authentication is enabled, mirroring Python's
+// get_auth_headers_if_auth_enabled. The enabled check is the shared auth
+// package's TokenAuthEnabled (token or k8s mode); the token follows the same
+// precedence as the auth token loader (RAY_AUTH_TOKEN env, then the first
+// non-empty line of RAY_AUTH_TOKEN_PATH read through gcs.ReadTokenFile). A nil
+// map means no header is attached.
+func authHeaders() map[string]string {
+	if !auth.TokenAuthEnabled() {
+		return nil
 	}
-	path := os.Getenv("RAY_AUTH_TOKEN_PATH")
-	if path == "" {
-		return ""
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if trimmed := strings.TrimSpace(line); trimmed != "" {
-			return trimmed
+	token := os.Getenv("RAY_AUTH_TOKEN")
+	if token == "" {
+		if path := os.Getenv("RAY_AUTH_TOKEN_PATH"); path != "" {
+			if t, err := gcs.ReadTokenFile(path); err == nil {
+				token = t
+			}
 		}
 	}
-	return ""
+	if token == "" {
+		log.Log.V(1).Info("Token authentication is enabled but no token was found. " +
+			"Requests to authenticated clusters will fail.")
+		return nil
+	}
+	return map[string]string{auth.AuthorizationHeaderName: auth.BearerPrefix + token}
 }
 
-// getInternalStates returns the module internal states: 204 No Content until
-// both a report and a request have been counted, otherwise 200 JSON with the
-// cumulative counters, queue length and uptime.
+// getInternalStates returns the module internal states: no content until both a
+// report and a request have been counted, otherwise JSON with the cumulative
+// counters, queue length and uptime. It backs no HTTP route (the Python
+// EventAgent keeps get_internal_states as an internal accessor only).
 func (e *EventAgent) getInternalStates() ([]byte, bool) {
 	total := e.totalEventReported.Load()
 	requests := e.totalRequestSent.Load()
@@ -261,7 +272,6 @@ func (e *EventAgent) getInternalStates() ([]byte, bool) {
 		"total_events_reported": total,
 		"Total_report_request":  requests,
 		"queue_size":            len(e.queue),
-		"queue_dropped_batches": e.droppedBatches.Load(),
 		"total_uptime":          time.Since(e.moduleStarted).Seconds(),
 	}
 	body, err := json.Marshal(states)
@@ -269,21 +279,4 @@ func (e *EventAgent) getInternalStates() ([]byte, bool) {
 		return nil, false
 	}
 	return body, true
-}
-
-// handleInternalStates serves GET /api/event_internal_states: 204 No Content
-// until the first event/request has been reported, then 200 with a JSON body.
-func (e *EventAgent) handleInternalStates(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "405: Method Not Allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	body, ok := e.getInternalStates()
-	if !ok {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(body)
 }
