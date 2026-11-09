@@ -20,6 +20,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"fmt"
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"io"
@@ -192,5 +193,55 @@ func TestPlainTCPDialerConnectsAndFails(t *testing.T) {
 	defer cancel()
 	if _, err := PlainTCPDialer(ctx, "127.0.0.1:1"); err == nil {
 		t.Fatal("dialing a closed port must fail")
+	}
+}
+
+func TestTokenCredRefreshesFromItsSource(t *testing.T) {
+	var reads int
+	cred := &tokenCred{
+		token: "stale",
+		source: func() (string, error) {
+			reads++
+			return fmt.Sprintf("tok-%d", reads), nil
+		},
+		refreshInterval: 0,
+	}
+	for i := 1; i <= 2; i++ {
+		md, err := cred.GetRequestMetadata(context.Background())
+		if err != nil {
+			t.Fatalf("GetRequestMetadata: %v", err)
+		}
+		want := fmt.Sprintf("%stok-%d", bearerPrefix, i)
+		if got := md[authorizationHeader]; got != want {
+			t.Fatalf("call %d token = %q, want %q", i, got, want)
+		}
+	}
+}
+
+func TestTokenCredWithoutSourceKeepsItsToken(t *testing.T) {
+	cred := &tokenCred{token: "fixed", refreshInterval: 0}
+	for i := 0; i < 2; i++ {
+		md, err := cred.GetRequestMetadata(context.Background())
+		if err != nil {
+			t.Fatalf("GetRequestMetadata: %v", err)
+		}
+		if got := md[authorizationHeader]; got != bearerPrefix+"fixed" {
+			t.Fatalf("token = %q, want the fixed token", got)
+		}
+	}
+}
+
+func TestTokenCredKeepsTheOldTokenWhenAReadFails(t *testing.T) {
+	cred := &tokenCred{
+		token:           "good",
+		source:          func() (string, error) { return "", io.ErrUnexpectedEOF },
+		refreshInterval: 0,
+	}
+	md, err := cred.GetRequestMetadata(context.Background())
+	if err != nil {
+		t.Fatalf("GetRequestMetadata: %v", err)
+	}
+	if got := md[authorizationHeader]; got != bearerPrefix+"good" {
+		t.Fatalf("token = %q, want the last good token", got)
 	}
 }

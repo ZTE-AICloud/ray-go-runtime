@@ -86,11 +86,12 @@ func DialOptionsFromEnv() (DialOptions, error) {
 		opts.KeyFile = keyFile
 	}
 
-	token, err := resolveAuthToken(os.Getenv(envAuthMode))
+	token, tokenSource, err := resolveAuthToken(os.Getenv(envAuthMode))
 	if err != nil {
 		return DialOptions{}, err
 	}
 	opts.Token = token
+	opts.TokenSource = tokenSource
 
 	return opts, nil
 }
@@ -122,40 +123,51 @@ func isEnvTrue(key string) bool {
 // rejections instead of refusing to start. No source fails resolution today,
 // but the error result lets one report a hard misconfiguration without
 // changing the callers.
-func resolveAuthToken(authMode string) (string, error) {
+// resolveAuthToken loads the bearer token following the C++
+// AuthenticationTokenLoader source order. The second result is a refresh
+// function for sources that rotate underneath a long-running process (the
+// projected service-account token), and nil for the fixed ones.
+//
+// A RAY_AUTH_TOKEN_PATH that is set but unreadable or empty is a hard error
+// rather than a step down to the next source: silently falling through would
+// authenticate with whatever ~/.ray/auth_token happens to hold, which the C++
+// loader refuses to do (RAY_CHECK on the load result).
+func resolveAuthToken(authMode string) (string, func() (string, error), error) {
 	if !strings.EqualFold(strings.TrimSpace(authMode), "token") {
-		return "", nil
+		return "", nil, nil
 	}
 
 	if v := strings.TrimSpace(os.Getenv(envAuthToken)); v != "" {
-		return v, nil
+		return v, nil, nil
 	}
 
 	if p := os.Getenv(envAuthTokenPath); p != "" {
-		if token, err := ReadTokenFile(p); err == nil {
-			if token != "" {
-				return token, nil
-			}
+		token, err := ReadTokenFile(p)
+		if err != nil {
+			return "", nil, fmt.Errorf("%s points to %s, which holds no token: %w", envAuthTokenPath, p, err)
 		}
+		if token == "" {
+			return "", nil, fmt.Errorf("%s points to %s, which holds no token", envAuthTokenPath, p)
+		}
+		return token, nil, nil
 	}
 
 	if isEnvTrue(envEnableK8sTokenAuth) {
-		if token, err := ReadTokenFile(rayServiceAccountTokenPath); err == nil {
-			if token != "" {
-				return token, nil
-			}
+		path := rayServiceAccountTokenPath
+		if token, err := ReadTokenFile(path); err == nil && token != "" {
+			// Kubelet rotates this file, so hand back a reader the client
+			// refreshes through instead of pinning the token read now.
+			return token, func() (string, error) { return ReadTokenFile(path) }, nil
 		}
 	}
 
 	if path := defaultAuthTokenPath(); path != "" {
-		if token, err := ReadTokenFile(path); err == nil {
-			if token != "" {
-				return token, nil
-			}
+		if token, err := ReadTokenFile(path); err == nil && token != "" {
+			return token, nil, nil
 		}
 	}
 
-	return "", nil
+	return "", nil, nil
 }
 
 // defaultAuthTokenPath returns the user-level token file ~/.ray/auth_token,

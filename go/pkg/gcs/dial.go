@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
@@ -66,6 +67,13 @@ type DialOptions struct {
 	KeyFile  string
 	// Token enables per-RPC bearer token authentication.
 	Token string
+	// TokenSource, when set, re-reads a token that rotates on disk and
+	// supersedes Token once its first read completes. Kubelet rewrites the
+	// projected Ray service-account token roughly hourly, so a long-lived
+	// process that captured the token once would start failing authentication
+	// an hour into its life; the C++ AuthenticationTokenLoader invalidates its
+	// cache on the same trigger.
+	TokenSource func() (string, error)
 	// ConnectTimeoutMs bounds, in milliseconds, the wait for the channel to
 	// become Ready after the connection attempt is started. Zero means
 	// non-blocking: return immediately without waiting for Ready.
@@ -93,6 +101,9 @@ func (d DialOptions) Override(o DialOptions) DialOptions {
 	}
 	if o.Token != "" {
 		d.Token = o.Token
+	}
+	if o.TokenSource != nil {
+		d.TokenSource = o.TokenSource
 	}
 	if o.ConnectTimeoutMs != 0 {
 		d.ConnectTimeoutMs = o.ConnectTimeoutMs
@@ -132,8 +143,12 @@ func DialGCS(ctx context.Context, address string, opts DialOptions) (*grpc.Clien
 	} else {
 		dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
-	if opts.Token != "" {
-		dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(tokenCred{token: opts.Token}))
+	if opts.Token != "" || opts.TokenSource != nil {
+		dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(&tokenCred{
+			token:           opts.Token,
+			source:          opts.TokenSource,
+			refreshInterval: tokenCredRefreshInterval,
+		}))
 	}
 	// grpc.NewClient is lazy: the channel stays idle until the first RPC or an
 	// explicit Connect. Kick it out of idle so connection attempts start now
@@ -203,11 +218,49 @@ func buildTLSConfig(caFile, certFile, keyFile string) (*tls.Config, error) {
 	return cfg, nil
 }
 
-// tokenCred implements credentials.PerRPCCredentials for bearer token auth.
-type tokenCred struct{ token string }
+// tokenCredRefreshInterval bounds how long a token read through TokenSource is
+// reused. Kubelet rotates the projected service-account token roughly hourly,
+// so a five-minute refresh keeps the client authenticated across rotations
+// without re-reading the file on every RPC.
+const tokenCredRefreshInterval = 5 * time.Minute
 
-func (t tokenCred) GetRequestMetadata(ctx context.Context, uri ...string) (map[string]string, error) {
-	return map[string]string{authorizationHeader: bearerPrefix + t.token}, nil
+// tokenCred implements credentials.PerRPCCredentials for bearer token auth.
+// When a TokenSource is present the token is re-read once refreshInterval has
+// elapsed since the last read, so a token file rotated underneath a
+// long-running process does not leave it authenticating with a stale value.
+type tokenCred struct {
+	token           string
+	source          func() (string, error)
+	refreshInterval time.Duration
+
+	mu        sync.Mutex
+	fetchedAt time.Time
 }
 
-func (t tokenCred) RequireTransportSecurity() bool { return false }
+// current returns the token to send, refreshing it through the source when the
+// refresh interval has elapsed. A failed or empty read keeps the previous
+// token and is retried on the next call rather than substituting nothing.
+func (t *tokenCred) current() string {
+	if t.source == nil {
+		return t.token
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if time.Since(t.fetchedAt) >= t.refreshInterval {
+		t.fetchedAt = time.Now()
+		if fresh, err := t.source(); err == nil && fresh != "" {
+			t.token = fresh
+		}
+	}
+	return t.token
+}
+
+func (t *tokenCred) GetRequestMetadata(ctx context.Context, uri ...string) (map[string]string, error) {
+	tok := t.current()
+	if tok == "" {
+		return map[string]string{}, nil
+	}
+	return map[string]string{authorizationHeader: bearerPrefix + tok}, nil
+}
+
+func (t *tokenCred) RequireTransportSecurity() bool { return false }

@@ -361,3 +361,66 @@ func TestIsEnvTrue(t *testing.T) {
 		}
 	}
 }
+
+func TestAuthTokenPathThatCannotBeReadIsAnError(t *testing.T) {
+	t.Setenv("RAY_AUTH_MODE", "token")
+	t.Setenv("RAY_AUTH_TOKEN_PATH", filepath.Join(t.TempDir(), "absent"))
+	t.Setenv("HOME", t.TempDir())
+	if _, err := DialOptionsFromEnv(); err == nil {
+		t.Fatal("a RAY_AUTH_TOKEN_PATH that cannot be read must fail instead of " +
+			"falling through to another token source")
+	}
+}
+
+func TestAuthTokenPathThatIsEmptyIsAnError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, []byte("\n \n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	t.Setenv("RAY_AUTH_MODE", "token")
+	t.Setenv("RAY_AUTH_TOKEN_PATH", path)
+	t.Setenv("HOME", t.TempDir())
+	if _, err := DialOptionsFromEnv(); err == nil {
+		t.Fatal("a RAY_AUTH_TOKEN_PATH holding no token must fail")
+	}
+}
+
+func TestK8sServiceAccountTokenIsRefreshable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sa-token")
+	if err := os.WriteFile(path, []byte("sa-token-v1\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	prev := rayServiceAccountTokenPath
+	rayServiceAccountTokenPath = path
+	t.Cleanup(func() { rayServiceAccountTokenPath = prev })
+
+	t.Setenv("RAY_AUTH_MODE", "token")
+	t.Setenv("RAY_ENABLE_K8S_TOKEN_AUTH", "1")
+	t.Setenv("HOME", t.TempDir())
+
+	opts, err := DialOptionsFromEnv()
+	if err != nil {
+		t.Fatalf("DialOptionsFromEnv: %v", err)
+	}
+	if opts.TokenSource == nil {
+		t.Fatal("a service-account token rotates; the options must carry a source")
+	}
+	if err := os.WriteFile(path, []byte("sa-token-v2\n"), 0o600); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	fresh, err := opts.TokenSource()
+	if err != nil {
+		t.Fatalf("TokenSource: %v", err)
+	}
+	if fresh != "sa-token-v2" {
+		t.Fatalf("TokenSource = %q, want the rotated token sa-token-v2", fresh)
+	}
+}
+
+func TestFixedTokenSourcesCarryNoRefreshFunction(t *testing.T) {
+	t.Setenv("RAY_AUTH_MODE", "token")
+	t.Setenv("RAY_AUTH_TOKEN", "fixed-token")
+	if opts, err := DialOptionsFromEnv(); err != nil || opts.TokenSource != nil {
+		t.Fatalf("opts = %+v, err = %v; a fixed env token needs no refresh", opts, err)
+	}
+}
