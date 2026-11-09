@@ -17,6 +17,7 @@ package gcs
 import (
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 )
@@ -111,7 +112,9 @@ func isEnvTrue(key string) bool {
 //  1. RAY_AUTH_TOKEN environment variable.
 //  2. RAY_AUTH_TOKEN_PATH file (first non-empty line, whitespace-trimmed).
 //  3. The Ray service-account token when RAY_ENABLE_K8S_TOKEN_AUTH is on.
-//  4. The default ~/.ray/auth_token file (first non-empty line, trimmed).
+//  4. The default ~/.ray/auth_token file (first non-empty line, trimmed),
+//     resolved from HOME with a fallback to the user database when HOME is
+//     unset (aligned with the C++ AuthenticationTokenLoader GetDefaultTokenPath).
 //
 // Any authMode other than "token" (case-insensitive) resolves nothing. Every
 // source is best-effort: an unreadable or empty file falls through to the next
@@ -144,8 +147,8 @@ func resolveAuthToken(authMode string) (string, error) {
 		}
 	}
 
-	if home, err := os.UserHomeDir(); err == nil {
-		if token, err := ReadTokenFile(filepath.Join(home, DefaultAuthTokenPath)); err == nil {
+	if path := defaultAuthTokenPath(); path != "" {
+		if token, err := ReadTokenFile(path); err == nil {
 			if token != "" {
 				return token, nil
 			}
@@ -153,6 +156,24 @@ func resolveAuthToken(authMode string) (string, error) {
 	}
 
 	return "", nil
+}
+
+// defaultAuthTokenPath returns the user-level token file ~/.ray/auth_token,
+// resolving the home directory from HOME and falling back to the user database
+// when HOME is unset, aligned with the C++ AuthenticationTokenLoader
+// GetDefaultTokenPath. It returns "" when no home directory resolves, which
+// makes the token read find no token.
+func defaultAuthTokenPath() string {
+	home := os.Getenv("HOME")
+	if home == "" {
+		if u, err := user.Current(); err == nil {
+			home = u.HomeDir
+		}
+	}
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, DefaultAuthTokenPath)
 }
 
 // ReadTokenFile returns the first non-empty line of path, whitespace-trimmed,

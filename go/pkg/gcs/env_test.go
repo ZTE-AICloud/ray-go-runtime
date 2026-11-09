@@ -16,7 +16,9 @@ package gcs
 
 import (
 	"os"
+	"os/user"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -248,6 +250,29 @@ func TestDialOptionsFromEnvTokenDefaultPath(t *testing.T) {
 	}
 	if opts.Token != "home-token" {
 		t.Fatalf("DialOptionsFromEnv() Token = %q, want %q (default ~/.ray/auth_token)", opts.Token, "home-token")
+	}
+}
+
+// TestDefaultAuthTokenPathFallsBackToTheUserDatabase pins the fork's home
+// resolution: with HOME unset, the default token path falls back to the user
+// database instead of resolving nothing. The test host has a passwd entry, so
+// user.Current() supplies the fallback home.
+func TestDefaultAuthTokenPathFallsBackToTheUserDatabase(t *testing.T) {
+	t.Setenv("HOME", "")
+	u, err := user.Current()
+	if err != nil {
+		t.Fatalf("user.Current() failed; the HOME fallback needs the user database: %v", err)
+	}
+	if u.HomeDir == "" {
+		t.Fatal("user.Current().HomeDir is empty; the fallback cannot be exercised on this host")
+	}
+	want := filepath.Join(u.HomeDir, DefaultAuthTokenPath)
+	got := defaultAuthTokenPath()
+	if got != want {
+		t.Fatalf("defaultAuthTokenPath() = %q, want %q (user-database fallback)", got, want)
+	}
+	if !strings.Contains(got, u.HomeDir) {
+		t.Fatalf("defaultAuthTokenPath() = %q, want it to contain the fallback home %q", got, u.HomeDir)
 	}
 }
 
