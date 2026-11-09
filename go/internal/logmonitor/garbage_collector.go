@@ -26,8 +26,8 @@ import (
 	"github.com/ray-project/ray/go/pkg/log"
 )
 
-// File patterns scanned per directory, mirroring the C++
-// LogGarbageCollector (log_garbage_collector.h).
+// File patterns scanned per directory. These are the log file families the
+// Python and C++ core processes write, grouped as the collector treats them.
 var (
 	gcFilePatterns = []string{
 		"job-driver-*.log*",
@@ -51,12 +51,14 @@ var (
 	exportEventFilePatterns = []string{"event_EXPORT_*.log*"}
 )
 
-// maxValidGCPID is the exclusive upper bound for candidate PIDs, mirroring
-// C++ LogGarbageCollector::kMaxValidPid.
+// maxValidGCPID is the exclusive upper bound for candidate PIDs. Linux caps
+// pid_max well below this, so a larger number is a timestamp or an offset
+// captured by a loose pattern, not a process.
 const maxValidGCPID = 1000000
 
-// PID extraction patterns mirroring C++ ExtractCandidatePid
-// (log_garbage_collector.cc:117-156). Capture group indices are verbatim.
+// PID extraction patterns, one per log file family. The capture group index
+// is the group holding the PID; it differs per pattern because the families
+// place the PID in different positions.
 var gcPIDPatterns = []struct {
 	re    *regexp.Regexp
 	group int
@@ -97,8 +99,7 @@ type gcCandidate struct {
 	pid   *int // nil when no PID could be extracted
 }
 
-// GarbageCollector applies a two-tier log file deletion strategy mirroring
-// the C++ LogGarbageCollector:
+// GarbageCollector applies a two-tier log file deletion strategy:
 //
 //	Tier 1 -- process dead and mtime past retention -> delete
 //	Tier 2 -- total size exceeds cap -> evict oldest (skipping live processes)
@@ -190,6 +191,10 @@ func (g *GarbageCollector) scanDirectory(dirPath string, patterns []string) []gc
 		if !matchesAnyPattern(base, patterns) {
 			continue
 		}
+		// Lstat, not Stat: a symlinked log entry is left alone rather than
+		// followed to whatever it points at. Deleting through a link would
+		// remove a file this collector never scanned, so the deviation from
+		// the reference implementation's stat-based glob is deliberate.
 		fileInfo, err := os.Lstat(p)
 		if err != nil || !fileInfo.Mode().IsRegular() {
 			continue

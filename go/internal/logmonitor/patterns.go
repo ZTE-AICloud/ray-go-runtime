@@ -79,7 +79,7 @@ func parseWorkerFilename(path string) (string, *int, bool) {
 	if err != nil {
 		return "", nil, false
 	}
-	if pidValue <= 0 || pidValue >= 1000000 {
+	if pidValue <= 0 || pidValue >= maxValidGCPID {
 		return "", nil, false
 	}
 
@@ -161,6 +161,11 @@ func readdirPaths(dir string) ([]string, error) {
 // regular file is collected, and a broken symlink or symlink loop (stat
 // returns ELOOP) is skipped. A nonexistent dir returns an error, matching
 // readdirPaths.
+//
+// maxDepth is the only bound on a cycle that does not trip ELOOP — a link
+// pointing at an ancestor directory resolves fine and would recurse forever
+// without it, and the same underlying file can then be reached through more
+// than one path. The depth bound keeps that finite; it does not deduplicate.
 func readdirPathsRecursive(dir string, maxDepth int) ([]string, error) {
 	return readdirPathsRecursiveDepth(dir, 0, maxDepth)
 }
