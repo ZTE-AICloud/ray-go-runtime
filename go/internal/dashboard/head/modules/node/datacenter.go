@@ -42,6 +42,13 @@ const (
 	kvNamespaceJob  = "job"
 	kvHeadNodeIDKey = "head_node_id"
 
+	// kvNamespaceDashboard is KV_NAMESPACE_DASHBOARD. The dashboard agent
+	// registers its address there under the two prefixes below (agent.go
+	// registerAgentToGCS) and the head removes them when the node dies.
+	kvNamespaceDashboard           = "dashboard"
+	dashboardAgentAddrNodeIDPrefix = "DASHBOARD_AGENT_ADDR_NODE_ID_PREFIX:"
+	dashboardAgentAddrIPPrefix     = "DASHBOARD_AGENT_ADDR_IP_PREFIX:"
+
 	// nodeStatsInterval is how often the per-node core worker stats are pulled
 	// from each raylet's NodeManager gRPC service. Matches Python
 	// NODE_STATS_UPDATE_INTERVAL_SECONDS (node_consts.py).
@@ -130,6 +137,7 @@ func (d *DataSource) Start(ctx context.Context) error {
 					d.nodes[hex.EncodeToString(n.NodeId)] = n
 					d.mu.Unlock()
 					d.persistHeadNodeID(ctx, n)
+					d.removeAgentAddr(ctx, n)
 				case err := <-errCh:
 					if status.Code(err) == codes.Unimplemented {
 						// GCS servers built without the pubsub service report
@@ -380,6 +388,32 @@ func (d *DataSource) persistHeadNodeID(ctx context.Context, n *proto.GcsNodeInfo
 	log.Log.Info("persisted head node id", "node_id", nodeIDHex)
 }
 
+// removeAgentAddr deletes a dead node's dashboard agent address entries from
+// the "dashboard" KV namespace, aligned with Python node_head._update_node
+// (which removes both keys on a DEAD update). Both keys are attempted even if
+// the first delete fails, because the entries are keyed by node id and by node
+// manager address, and either one left behind points consumers at a dead agent.
+func (d *DataSource) removeAgentAddr(ctx context.Context, n *proto.GcsNodeInfo) {
+	if d.client == nil || n.GetState() != proto.GcsNodeInfo_DEAD {
+		return
+	}
+	nodeIDHex := hex.EncodeToString(n.NodeId)
+	keys := []string{
+		dashboardAgentAddrNodeIDPrefix + nodeIDHex,
+		dashboardAgentAddrIPPrefix + n.GetNodeManagerAddress(),
+	}
+	for _, key := range keys {
+		deleted, err := d.client.InternalKVDel(ctx, kvNamespaceDashboard, key, false)
+		if err != nil {
+			log.Log.Error(err, "failed to remove dead node dashboard agent address",
+				"node_id", nodeIDHex, "key", key)
+			continue
+		}
+		log.Log.Info("removed dead node dashboard agent address",
+			"node_id", nodeIDHex, "key", key, "deleted", deleted)
+	}
+}
+
 // applyActorUpdate merges one actor-table update into the cache, aligned with
 // Python _process_updated_actor_table: for an actor already in the cache only
 // the state columns change (the GCS publishes ALIVE/DEAD updates with the
@@ -438,6 +472,7 @@ func (d *DataSource) initFromGCS(ctx context.Context) error {
 		// is already ALIVE when the subscription starts (no update event follows).
 		for _, n := range nodeReply.NodeInfoList {
 			d.persistHeadNodeID(ctx, n)
+			d.removeAgentAddr(ctx, n)
 		}
 	}
 	actorReply, err := d.client.GetAllActorInfo(ctx, &proto.GetAllActorInfoRequest{})
