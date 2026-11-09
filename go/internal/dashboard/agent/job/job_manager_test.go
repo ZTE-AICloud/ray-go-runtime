@@ -16,7 +16,9 @@ package job
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -183,10 +185,15 @@ func TestPutStatusAfterTerminal(t *testing.T) {
 	_, err := jm.jobInfoClient.PutInfo(ctx, "job1", &JobInfo{Entrypoint: "python -c pass", Status: JobStatusPending}, false)
 	require.NoError(t, err)
 
-	require.NoError(t, jm.putStatus(ctx, "job1", JobStatusSucceeded, nil, nil, nil))
-	err = jm.putStatus(ctx, "job1", JobStatusFailed, nil, nil, nil)
+	previous, err := jm.putStatus(ctx, "job1", JobStatusSucceeded, nil, nil, nil)
+	require.NoError(t, err)
+	require.NotNil(t, previous)
+	assert.Equal(t, JobStatusPending, *previous)
+	previous, err = jm.putStatus(ctx, "job1", JobStatusFailed, nil, nil, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "terminal")
+	require.NotNil(t, previous)
+	assert.Equal(t, JobStatusSucceeded, *previous)
 
 	status, err := jm.getJobStatus(ctx, "job1")
 	require.NoError(t, err)
@@ -246,12 +253,14 @@ func TestPutStatusConcurrentTransitionsDoNotResurrect(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		<-start
-		errs <- jm.putStatus(ctx, "job1", JobStatusSucceeded, nil, nil, nil)
+		_, err := jm.putStatus(ctx, "job1", JobStatusSucceeded, nil, nil, nil)
+		errs <- err
 	}()
 	go func() {
 		defer wg.Done()
 		<-start
-		errs <- jm.putStatus(ctx, "job1", JobStatusFailed, nil, nil, nil)
+		_, err := jm.putStatus(ctx, "job1", JobStatusFailed, nil, nil, nil)
+		errs <- err
 	}()
 	close(start)
 	wg.Wait()
@@ -282,7 +291,9 @@ func TestPutStatusDoesNotResurrectDeletedJob(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, jm.jobInfoClient.DeleteInfo(ctx, "job1"))
 
-	require.NoError(t, jm.putStatus(ctx, "job1", JobStatusFailed, nil, nil, nil))
+	previous, err := jm.putStatus(ctx, "job1", JobStatusFailed, nil, nil, nil)
+	require.NoError(t, err)
+	assert.Nil(t, previous)
 
 	info, err := jm.jobInfoClient.GetInfo(ctx, "job1")
 	require.NoError(t, err)
@@ -368,4 +379,82 @@ func TestHandleSupervisorFailureWritesFailed(t *testing.T) {
 	assert.Equal(t, JobStatusFailed, sink.completed[0].status)
 	assert.NotEmpty(t, sink.completed[0].errMsg)
 	assert.Contains(t, jm.getJobLogs("job1"), "Job supervisor actor died")
+}
+
+// stagedStatusGCSClient scripts the status returned for one job's internal-KV
+// reads and repeats the last scripted status afterwards. It reproduces the
+// interleaving where the monitor's re-read sees PENDING but the status write's
+// own read sees the terminal status a concurrent stop just wrote.
+type stagedStatusGCSClient struct {
+	*fakeGCSClient
+	key      string
+	statuses []JobStatus
+
+	mu    sync.Mutex
+	reads int
+}
+
+func (c *stagedStatusGCSClient) Get(ctx context.Context, ns, key string) ([]byte, error) {
+	if key != c.key || len(c.statuses) == 0 {
+		return c.fakeGCSClient.Get(ctx, ns, key)
+	}
+	c.mu.Lock()
+	idx := c.reads
+	c.reads++
+	c.mu.Unlock()
+	if idx >= len(c.statuses) {
+		idx = len(c.statuses) - 1
+	}
+	payload, err := json.Marshal(&JobInfo{Entrypoint: "python -c pass", Status: c.statuses[idx]})
+	if err != nil {
+		return nil, err
+	}
+	return payload, nil
+}
+
+// TestHandleSupervisorFailureAfterTerminalRace covers the residual window: the
+// handler's re-read still sees PENDING, but the status write's own read sees
+// the STOPPED status a concurrent stop wrote. The exit must be reported as
+// expected, with no FAILED event, no error log line, and no driver log line.
+func TestHandleSupervisorFailureAfterTerminalRace(t *testing.T) {
+	ctx := t.Context()
+	sink := &recordingEventSink{}
+	client := &stagedStatusGCSClient{
+		fakeGCSClient: newFakeGCSClient(),
+		key:           jobDataKeyFor("job1"),
+		statuses:      []JobStatus{JobStatusPending, JobStatusStopped},
+	}
+	jm := &JobManager{
+		ctx:           ctx,
+		jobInfoClient: NewJobInfoStorageClient(client),
+		logClient:     NewJobLogStorageClient(t.TempDir()),
+		eventLogger:   sink,
+	}
+
+	jm.handleSupervisorFailure("job1", errors.New("actor died"))
+
+	require.Len(t, sink.completed, 1)
+	assert.Equal(t, JobStatusStopped, sink.completed[0].status)
+	assert.Empty(t, sink.completed[0].errMsg)
+	assert.Empty(t, jm.getJobLogs("job1"))
+	_, err := os.Stat(jm.logClient.getLogFilePath("job1"))
+	assert.True(t, os.IsNotExist(err), "an expected exit must not create a driver log")
+}
+
+// TestHandleSupervisorFailureAfterDelete covers the deleted-record window: the
+// write is dropped, and neither the FAILED event nor the driver log line is
+// emitted, so the monitor does not recreate artifacts of a deleted job.
+func TestHandleSupervisorFailureAfterDelete(t *testing.T) {
+	ctx := t.Context()
+	jm, sink := newTestJobManager(t)
+	_, err := jm.jobInfoClient.PutInfo(ctx, "job1", &JobInfo{Entrypoint: "python -c pass", Status: JobStatusPending}, false)
+	require.NoError(t, err)
+	require.NoError(t, jm.jobInfoClient.DeleteInfo(ctx, "job1"))
+
+	jm.handleSupervisorFailure("job1", errors.New("actor died"))
+
+	assert.Empty(t, sink.completed, "a deleted job must not emit a completion event")
+	assert.Empty(t, jm.getJobLogs("job1"))
+	_, err = os.Stat(jm.logClient.getLogFilePath("job1"))
+	assert.True(t, os.IsNotExist(err), "a deleted job must not get a recreated driver log")
 }

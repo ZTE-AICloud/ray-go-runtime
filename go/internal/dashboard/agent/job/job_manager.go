@@ -210,43 +210,60 @@ func (m *JobManager) appendDriverLog(jobID, line string) {
 }
 
 // putStatus is the only path that writes a job status from this process. See
-// the statusMu comment for why the write is serialized. A missing record means
-// the job was deleted while the caller was racing it: PutStatus would create a
-// new record, so the write is dropped instead of resurrecting a deleted job.
-func (m *JobManager) putStatus(ctx context.Context, jobID string, status JobStatus, message *string, driverExitCode *int32, errorType *JobErrorType) error {
+// the statusMu comment for why the write is serialized. It returns the status
+// stored before the write (nil when the record is gone) so callers can
+// reconcile a terminal transition that raced them. A missing record means the
+// job was deleted while the caller was racing it: PutStatus would create a new
+// record, so the write is dropped instead of resurrecting a deleted job.
+func (m *JobManager) putStatus(ctx context.Context, jobID string, status JobStatus, message *string, driverExitCode *int32, errorType *JobErrorType) (*JobStatus, error) {
 	m.statusMu.Lock()
 	defer m.statusMu.Unlock()
 	existing, err := m.jobInfoClient.GetStatus(ctx, jobID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if existing == nil {
 		log.Log.V(4).Info("job record is gone; dropping status write", "job_id", jobID, "status", status)
-		return nil
+		return nil, nil
 	}
-	return m.jobInfoClient.PutStatus(ctx, jobID, status, message, driverExitCode, errorType)
+	return existing, m.jobInfoClient.PutStatus(ctx, jobID, status, message, driverExitCode, errorType)
 }
 
 // handleSupervisorFailure handles a ping failure of the supervisor. The status
 // is re-read first: a stop that landed after the monitor loop's last status
 // read makes the actor exit expected, not a job failure. Python performs the
-// same read inside its exception handler.
+// same read inside its exception handler. A status that turns terminal at
+// write time (the stop's own status write won the race) is routed to the same
+// expected-exit branch, and a deleted record suppresses every emission so the
+// monitor does not recreate artifacts of a job the user deleted.
 func (m *JobManager) handleSupervisorFailure(jobID string, pingErr error) {
 	jobStatus, err := m.jobInfoClient.GetStatus(m.ctx, jobID)
 	if err != nil {
 		log.Log.Error(err, "failed to re-read job status after a supervisor ping failure")
 	}
 	if jobStatus != nil && jobStatus.IsTerminal() {
-		// The supervisor exiting after the job reached a terminal state is
-		// expected.
 		m.eventLogger.submissionCompleted(jobID, *jobStatus, "")
 		return
 	}
 
 	msg, et := classifySupervisorError(pingErr)
-	if perr := m.putStatus(m.ctx, jobID, JobStatusFailed, msg, nil, &et); perr != nil {
-		log.Log.Error(perr, "failed to update job status")
+	previous, perr := m.putStatus(m.ctx, jobID, JobStatusFailed, msg, nil, &et)
+	if previous != nil && previous.IsTerminal() {
+		// A concurrent writer made the job terminal between the read above and
+		// the status write (e.g. the stop path's supervisor wrote STOPPED).
+		m.eventLogger.submissionCompleted(jobID, *previous, "")
+		return
 	}
+	if perr != nil {
+		log.Log.Error(perr, "failed to update job status")
+		return
+	}
+	if previous == nil {
+		// The record was deleted; do not recreate the driver log or emit an
+		// event for a deleted job.
+		return
+	}
+
 	log.Log.Error(pingErr, "job monitoring failed")
 	var errorMessage string
 	if msg != nil {
@@ -422,7 +439,7 @@ func (m *JobManager) submitJob(ctx context.Context, req *JobSubmitRequest) (stri
 		log.Log.Error(fmt.Errorf("%s", tb), "failed to initialize Ray runtime")
 		msg := tb
 		et := JobErrorTypeJobSupervisorActorStartFailure
-		if perr := m.putStatus(ctx, submissionID, JobStatusFailed, &msg, nil, &et); perr != nil {
+		if _, perr := m.putStatus(ctx, submissionID, JobStatusFailed, &msg, nil, &et); perr != nil {
 			log.Log.Error(perr, "failed to update job status to FAILED")
 		}
 		return submissionID, nil
@@ -451,7 +468,7 @@ func (m *JobManager) submitJob(ctx context.Context, req *JobSubmitRequest) (stri
 		log.Log.Error(fmt.Errorf("%s", tb), "failed to start supervisor actor")
 		msg := tb
 		et := JobErrorTypeJobSupervisorActorStartFailure
-		if perr := m.putStatus(ctx, submissionID, JobStatusFailed, &msg, nil, &et); perr != nil {
+		if _, perr := m.putStatus(ctx, submissionID, JobStatusFailed, &msg, nil, &et); perr != nil {
 			log.Log.Error(perr, "failed to update job status to FAILED")
 		}
 		return submissionID, nil
@@ -526,7 +543,7 @@ func (m *JobManager) monitorJobInternal(jobID string, supervisor *supervisorActo
 					errMsg += " This may be because the job entrypoint's specified resources (entrypoint_num_cpus, entrypoint_num_gpus, entrypoint_resources, entrypoint_memory) aren't available on the cluster. Try checking the cluster's available resources with `ray status` and specifying fewer resources for the job entrypoint."
 				}
 				et := JobErrorTypeJobSupervisorActorStartTimeout
-				if perr := m.putStatus(m.ctx, jobID, JobStatusFailed, &errMsg, nil, &et); perr != nil {
+				if _, perr := m.putStatus(m.ctx, jobID, JobStatusFailed, &errMsg, nil, &et); perr != nil {
 					log.Log.Error(perr, "failed to update job status")
 				}
 				log.Log.Error(fmt.Errorf("%s", errMsg), "job supervisor start timeout")
@@ -549,7 +566,7 @@ func (m *JobManager) monitorJobInternal(jobID string, supervisor *supervisorActo
 			}
 			msg := "Unexpected error occurred: failed to get job supervisor."
 			et := JobErrorTypeJobSupervisorActorStartFailure
-			if perr := m.putStatus(m.ctx, jobID, JobStatusFailed, &msg, nil, &et); perr != nil {
+			if _, perr := m.putStatus(m.ctx, jobID, JobStatusFailed, &msg, nil, &et); perr != nil {
 				log.Log.Error(perr, "failed to update job status")
 			}
 			break
