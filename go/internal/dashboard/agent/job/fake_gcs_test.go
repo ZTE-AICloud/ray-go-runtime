@@ -30,8 +30,9 @@ import (
 // return zero values because the agent job tests do not exercise them.
 // mockgcs does not implement the KV interface, hence the hand-rolled fake.
 type fakeGCSClient struct {
-	mu sync.Mutex
-	kv map[string][]byte
+	mu   sync.Mutex
+	kv   map[string][]byte
+	jobs []*proto.JobTableData
 }
 
 var _ gcs.Client = (*fakeGCSClient)(nil)
@@ -165,7 +166,9 @@ func (f *fakeGCSClient) ListJobs(ctx context.Context) ([]*proto.JobTableData, er
 }
 
 func (f *fakeGCSClient) ListJobsWithFilter(ctx context.Context, jobOrSubmissionID string, skipSubmissionJobInfoField, skipIsRunningTasksField bool) ([]*proto.JobTableData, error) {
-	return nil, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.jobs, nil
 }
 
 func (f *fakeGCSClient) NextJobID(ctx context.Context) (ids.JobID, error) {

@@ -173,10 +173,89 @@ func TestGetDriverJobs(t *testing.T) {
 	ctx := context.Background()
 	client := newFakeGCSClient()
 
+	// An empty job listing yields empty maps.
 	jobs, submissionDrivers, err := getDriverJobs(ctx, client, "")
 	require.NoError(t, err)
 	assert.Empty(t, jobs)
 	assert.Empty(t, submissionDrivers)
+
+	client.jobs = []*proto.JobTableData{
+		// An internal-namespace job is hidden from the job APIs.
+		{
+			JobId: []byte{0x03},
+			Config: &proto.JobConfig{
+				RayNamespace: jobutil.RayInternalNamespacePrefix + "dashboard",
+				Metadata:     map[string]string{jobutil.JobIDMetadataKey: "internal-sub"},
+			},
+		},
+		// A live driver job without submission metadata.
+		{
+			JobId:         []byte{0x01},
+			DriverPid:     4242,
+			Entrypoint:    "echo alive",
+			StartTime:     100,
+			EndTime:       200,
+			DriverAddress: &proto.Address{IpAddress: "10.0.0.1"},
+			Config: &proto.JobConfig{
+				RayNamespace:   "default",
+				RuntimeEnvInfo: &proto.RuntimeEnvInfo{SerializedRuntimeEnv: `{"pip":["x"]}`},
+			},
+		},
+		// A dead driver job maps to SUCCEEDED.
+		{
+			JobId:  []byte{0x02},
+			IsDead: true,
+			Config: &proto.JobConfig{RayNamespace: "default"},
+		},
+		// A driver carrying the submission id metadata belongs to a submission
+		// job, not to the driver job table.
+		{
+			JobId: []byte{0x04},
+			Config: &proto.JobConfig{
+				RayNamespace: "default",
+				Metadata:     map[string]string{jobutil.JobIDMetadataKey: "sub1"},
+			},
+		},
+	}
+
+	jobs, submissionDrivers, err = getDriverJobs(ctx, client, "")
+	require.NoError(t, err)
+
+	// Only the two non-submission, non-internal drivers are jobs.
+	assert.Len(t, jobs, 2)
+	assert.NotContains(t, jobs, "03")
+	assert.NotContains(t, jobs, "04")
+
+	alive := jobs["01"]
+	require.NotNil(t, alive)
+	assert.Equal(t, JobTypeDriver, alive.Type)
+	assert.Equal(t, JobStatusRunning, alive.Status)
+	assert.Equal(t, "echo alive", alive.Entrypoint)
+	require.NotNil(t, alive.JobID)
+	assert.Equal(t, "01", *alive.JobID)
+	// Missing driver metadata defaults to an empty, non-nil map.
+	assert.NotNil(t, alive.Metadata)
+	assert.Empty(t, alive.Metadata)
+	require.NotNil(t, alive.StartTime)
+	assert.Equal(t, int64(100), *alive.StartTime)
+	require.NotNil(t, alive.EndTime)
+	assert.Equal(t, int64(200), *alive.EndTime)
+	assert.Equal(t, map[string]interface{}{"pip": []interface{}{"x"}}, alive.RuntimeEnv)
+	require.NotNil(t, alive.DriverInfo)
+	assert.Equal(t, "01", alive.DriverInfo.ID)
+	assert.Equal(t, "10.0.0.1", alive.DriverInfo.NodeIPAddress)
+	assert.Equal(t, "4242", alive.DriverInfo.PID)
+
+	dead := jobs["02"]
+	require.NotNil(t, dead)
+	assert.Equal(t, JobStatusSucceeded, dead.Status)
+
+	// Only the submission driver is recorded, keyed by its submission id.
+	assert.Len(t, submissionDrivers, 1)
+	require.NotNil(t, submissionDrivers["sub1"])
+	assert.Equal(t, "04", submissionDrivers["sub1"].ID)
+	// The internal-namespace row contributes no submission driver.
+	assert.NotContains(t, submissionDrivers, "internal-sub")
 }
 
 func TestSubmissionJobDetails(t *testing.T) {
@@ -211,6 +290,4 @@ func TestJobutilConstantsDriftGuard(t *testing.T) {
 	// The composed keys must match the Python side byte for byte.
 	assert.Equal(t, "_ray_internal_job_info_", jobDataKeyPrefix)
 	assert.Equal(t, "_ray_internal_job_info_sub1", jobDataKeyFor("sub1"))
-
-	_ = &proto.JobTableData{}
 }

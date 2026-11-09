@@ -24,6 +24,7 @@ go_test(
     srcs = [
         "common_test.go",
         "fake_gcs_test.go",
+        "job_events_test.go",
         "job_log_storage_client_test.go",
         "job_utils_test.go",
     ],
