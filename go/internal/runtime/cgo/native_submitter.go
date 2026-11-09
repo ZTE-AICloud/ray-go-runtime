@@ -432,6 +432,18 @@ func convertActorCreationOptionsToC(opts *submitter.ActorCreationOptions, actorD
 		cOpts.bundle_index = C.int(opts.PlacementGroup.BundleIndex)
 	}
 
+	// Convert node affinity (head-node pinning for the job driver), mirroring
+	// the placement-group conversion above. The node ID is a hex string
+	// consumed by CNativeTaskSubmitter_CreateActor -> BuildActorOptions ->
+	// BuildNodeAffinitySchedulingStrategy.
+	if opts.NodeAffinity != nil {
+		if opts.NodeAffinity.NodeID != "" {
+			cOpts.node_affinity_node_id = C.CString(opts.NodeAffinity.NodeID)
+			cOpts.node_affinity_node_id_size = C.int(len(opts.NodeAffinity.NodeID))
+		}
+		cOpts.node_affinity_soft = C.bool(opts.NodeAffinity.Soft)
+	}
+
 	if opts.Name != "" {
 		cOpts.name = C.CString(opts.Name)
 	}
@@ -611,6 +623,9 @@ func freeActorCreationOptions(opts *C.CActorCreationOptions) {
 	}
 	if opts.placement_group_id != nil {
 		C.free(unsafe.Pointer(opts.placement_group_id))
+	}
+	if opts.node_affinity_node_id != nil {
+		C.free(unsafe.Pointer(opts.node_affinity_node_id))
 	}
 	// Free concurrency group flat arrays: each group's descriptor array
 	// (per-method inner 4-element arrays), then the per-group outer arrays.

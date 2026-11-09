@@ -199,3 +199,19 @@ func TestConvertActorCreationOptionsToC_ConcurrencyGroups(t *testing.T) {
 
 	freeActorCreationOptions(result)
 }
+
+// TestConvertActorCreationOptionsToC_NodeAffinity verifies the node affinity
+// binding is converted to a non-empty C string with its size and soft flag, and
+// that freeActorCreationOptions releases it.
+func TestConvertActorCreationOptionsToC_NodeAffinity(t *testing.T) {
+	opts := &submitter.ActorCreationOptions{
+		NodeAffinity: &submitter.NodeAffinityOptions{NodeID: "abc", Soft: false},
+	}
+	result := convertActorCreationOptionsToC(opts, nil)
+	assert.NotNil(t, result)
+	assert.NotNil(t, result.node_affinity_node_id)
+	assert.Equal(t, "abc", C.GoString(result.node_affinity_node_id))
+	assert.Equal(t, C.int(3), result.node_affinity_node_id_size)
+	assert.False(t, bool(result.node_affinity_soft))
+	freeActorCreationOptions(result)
+}

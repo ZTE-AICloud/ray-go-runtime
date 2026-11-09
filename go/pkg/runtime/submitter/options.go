@@ -106,6 +106,11 @@ type ActorCreationOptions struct {
 	// PlacementGroup is the placement group for this actor.
 	PlacementGroup *PlacementGroupOptions
 
+	// NodeAffinity pins the actor to a specific node (head-node pinning).
+	// When set, it takes precedence over PlacementGroup and the default
+	// scheduling strategy.
+	NodeAffinity *NodeAffinityOptions
+
 	// ConcurrencyGroups is the list of concurrency groups for this actor.
 	// Each group can have its own maximum concurrent calls limit.
 	// Defined locally to avoid circular dependency with api package.
@@ -186,6 +191,16 @@ type PlacementGroupOptions struct {
 	// BundleIndex is the index of the bundle to use.
 	// Placement groups divide resources into bundles, and this specifies which bundle to use.
 	BundleIndex int
+}
+
+// NodeAffinityOptions pins an actor to a node.
+type NodeAffinityOptions struct {
+	// NodeID is the target node ID as a hex string.
+	NodeID string
+
+	// Soft allows the scheduler to spill to another node when the target node
+	// is unavailable. When false, the actor waits for the target node.
+	Soft bool
 }
 
 // RetryPolicy contains retry policy for tasks.

@@ -506,6 +506,24 @@ func (o *actorOptions[T]) WithPlacementGroup(group *PlacementGroup, bundleIndex 
 	return o.self
 }
 
+// WithNodeAffinity pins the actor to the given node.
+//
+// It is used for head-node pinning (e.g. a job driver that must run on the
+// head). The binding takes precedence over a placement group and the default
+// scheduling strategy when the actor is built.
+//
+// Parameters:
+//   - nodeID: The target node ID as a hex string.
+//   - soft: When true, the scheduler may spill to another node if the target
+//     node is unavailable. When false, the actor waits for the target node.
+//
+// Returns:
+//   - T: The same actor creator for chaining.
+func (o *actorOptions[T]) WithNodeAffinity(nodeID string, soft bool) T {
+	o.options.NodeAffinity = &submitter.NodeAffinityOptions{NodeID: nodeID, Soft: soft}
+	return o.self
+}
+
 // WithResources sets the resource requirements for the actor.
 //
 // Parameters:
