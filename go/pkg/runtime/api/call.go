@@ -764,9 +764,10 @@ func wrapPythonArgs(args []interface{}) []function.FunctionArg {
 	for _, arg := range args {
 		functionArgs = append(functionArgs, function.NewFunctionArgByValue(pythonDummyType, pythonDummyRawMetadata))
 		fa := convertArgToFunctionArg(arg)
-		// Value arguments are deserialized by the Python worker through its
-		// cross-language path, which requires the XLANG metadata; the Go-native
-		// metadata would be rejected as an unknown serialization format.
+		// Python's deserializer parses the metadata as an int; the Go-native
+		// "GO" format is unknown there and raises
+		// "Can't deserialize object: <ref>, metadata: GO", so value arguments
+		// must carry the cross-language metadata.
 		if fa.IsPassByValue() && fa.Data != nil {
 			fa.Data.Metadata = []byte(object.MetadataTypeCrossLanguage)
 		}

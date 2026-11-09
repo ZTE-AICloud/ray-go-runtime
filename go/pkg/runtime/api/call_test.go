@@ -85,8 +85,10 @@ func TestTaskCaller_WithPlacementGroup(t *testing.T) {
 // while the Go-native path keeps the Go metadata untouched.
 func TestWrapPythonArgsStampsCrossLanguageMetadata(t *testing.T) {
 	// The api test binary has no real serializer registered; the minimal test
-	// serializer mimics the Go metadata type for plain values.
+	// serializer mimics the Go metadata type for plain values. Restore the nil
+	// default afterwards so sibling tests are unaffected.
 	object.SetSerializer(testSerializer{})
+	defer object.SetSerializer(nil)
 
 	args := wrapPythonArgs([]interface{}{42})
 	if len(args) != 2 {
@@ -116,6 +118,24 @@ func TestWrapPythonArgsStampsCrossLanguageMetadata(t *testing.T) {
 	}
 	if got := string(goArgs[0].Data.Metadata); got != object.MetadataTypeGo {
 		t.Errorf("go-native arg metadata = %q, want %q", got, object.MetadataTypeGo)
+	}
+
+	// Pass-by-reference arguments carry no serialized data, so they must keep
+	// their non-XLANG shape: by-ref routing only, no metadata stamp.
+	ref := &ObjectRef[[]byte]{} // zero ObjectID is fine: only by-ref routing is asserted
+	refArgs := wrapPythonArgs([]interface{}{ref})
+	if len(refArgs) != 2 {
+		t.Fatalf("wrapPythonArgs returned %d args, want 2 (dummy marker + ref)", len(refArgs))
+	}
+	refArg := refArgs[1]
+	if refArg.IsPassByValue() {
+		t.Error("wrapped python object-ref arg routed by value, want by-ref")
+	}
+	if refArg.ObjectRef == nil {
+		t.Fatal("wrapped python object-ref arg is missing its object reference")
+	}
+	if refArg.Data != nil {
+		t.Errorf("wrapped python object-ref arg carries serialized data %q, want none", refArg.Data.Data)
 	}
 }
 
