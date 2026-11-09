@@ -26,7 +26,7 @@ import (
 
 const (
 	defaultMaxFilesOpen        = 200
-	defaultMaxLinesPerRead     = 1000
+	defaultNumLinesToRead      = 1000
 	defaultManyFilesThreshold  = 1000
 	defaultNameUpdateInterval  = 500 * time.Millisecond
 	defaultIdleSleep           = 100 * time.Millisecond
@@ -51,6 +51,23 @@ var (
 // DefaultMaxLineSize returns the default per-line size cap applied by the
 // monitor when RuntimeConfig.MaxLineSize is unset.
 func DefaultMaxLineSize() int { return defaultMaxLineSize }
+
+// DefaultMaxFilesOpen returns the default cap on concurrently open log files
+// applied when RuntimeConfig.MaxFilesOpen is unset.
+func DefaultMaxFilesOpen() int { return defaultMaxFilesOpen }
+
+// DefaultManyFilesThreshold returns the default threshold above which the
+// filename scan interval is throttled, applied when
+// RuntimeConfig.ManyFilesThreshold is unset.
+func DefaultManyFilesThreshold() int { return defaultManyFilesThreshold }
+
+// DefaultNumLinesToRead returns the default per-file line cap per scan cycle
+// applied when RuntimeConfig.NumLinesToRead is unset.
+func DefaultNumLinesToRead() int { return defaultNumLinesToRead }
+
+// DefaultNameUpdateInterval returns the default interval between filename list
+// updates applied when RuntimeConfig.NameUpdateInterval is unset.
+func DefaultNameUpdateInterval() time.Duration { return defaultNameUpdateInterval }
 
 func parseWorkerFilename(path string) (string, *int, bool) {
 	match := workerLogPattern.FindStringSubmatch(path)

@@ -48,6 +48,10 @@ const (
 	autoscalerV2EnabledEnvVar     = "RAY_enable_autoscaler_v2"
 	runtimeEnvLogToDriverEnvVar   = "RAY_RUNTIME_ENV_LOG_TO_DRIVER_ENABLED"
 	envMaxLineSize                = "RAY_GO_LOG_MONITOR_MAX_LINE_BYTES"
+	envMaxOpenFiles               = "RAY_LOG_MONITOR_MAX_OPEN_FILES"
+	envManyFilesThreshold         = "RAY_LOG_MONITOR_MANY_FILES_THRESHOLD"
+	envNumLinesToRead             = "RAY_LOG_MONITOR_NUM_LINES_TO_READ"
+	envNameUpdateInterval         = "LOG_NAME_UPDATE_INTERVAL_S"
 	envMemoryLimit                = "RAY_GO_LOG_MONITOR_MEMLIMIT"
 	defaultMemoryLimit            = 64 << 20
 	defaultGCSConnectTimeoutMilli = int64(5000)
@@ -107,6 +111,10 @@ var defaultRunnerDeps = runnerDeps{
 			RuntimeEnvToDriver:  runtimeEnvToDriver,
 			AutoscalerV2Enabled: autoscalerV2,
 			MaxLineSize:         maxLineSizeFromEnv(),
+			MaxFilesOpen:        envPositiveInt(envMaxOpenFiles, logmonitor.DefaultMaxFilesOpen()),
+			ManyFilesThreshold:  envPositiveInt(envManyFilesThreshold, logmonitor.DefaultManyFilesThreshold()),
+			NumLinesToRead:      envPositiveInt(envNumLinesToRead, logmonitor.DefaultNumLinesToRead()),
+			NameUpdateInterval:  envPositiveDuration(envNameUpdateInterval, logmonitor.DefaultNameUpdateInterval()),
 		})
 	},
 }
@@ -117,20 +125,62 @@ var defaultRunnerDeps = runnerDeps{
 // name, unit, or value) surfaces instead of silently falling back to the
 // default.
 func envPositiveInt(key string, defaultVal int) int {
-	v := common.EnvInteger(key, 0)
-	if v > 0 {
+	v, ok := envPositive(key, defaultVal, func(k string) int {
+		return common.EnvInteger(k, 0)
+	})
+	if ok {
 		return v
-	}
-	if _, ok := os.LookupEnv(key); ok {
-		fmt.Fprintf(os.Stderr,
-			"log_monitor: ignoring invalid %s (want a positive integer); using default %d\n",
-			key, defaultVal)
 	}
 	return defaultVal
 }
 
+// envPositive parses key via parse and adopts the parsed value only when it is
+// a positive finite number; otherwise a warning is written to stderr (naming
+// defaultDisplay as the fallback) when the variable is set but invalid, and
+// (value, false) is returned so callers can fall back precisely.
+func envPositive[T int | float64](key string, defaultDisplay any, parse func(string) T) (T, bool) {
+	v := parse(key)
+	if isPositiveFinite(v) {
+		return v, true
+	}
+	if _, ok := os.LookupEnv(key); ok {
+		fmt.Fprintf(os.Stderr,
+			"log_monitor: ignoring invalid %s (want a positive number); using default %v\n",
+			key, defaultDisplay)
+	}
+	return v, false
+}
+
+// isPositiveFinite reports whether v is strictly positive and, for floating
+// point values, finite (rejects +Inf/-Inf; NaN already fails the > 0 check).
+func isPositiveFinite[T int | float64](v T) bool {
+	switch t := any(v).(type) {
+	case int:
+		return t > 0
+	case float64:
+		return t > 0 && !math.IsInf(t, 0)
+	}
+	return false
+}
+
 func maxLineSizeFromEnv() int {
 	return envPositiveInt(envMaxLineSize, logmonitor.DefaultMaxLineSize())
+}
+
+// envPositiveDuration reads key as a positive number of seconds, falling back
+// to defaultVal when the variable is unset or not a positive number. A warning
+// is written to stderr when the variable is set but invalid, so a
+// misconfiguration (wrong name, unit, or value) surfaces instead of silently
+// falling back to the default. The returned value is the duration equivalent
+// of the value in seconds (0.5 -> 500ms).
+func envPositiveDuration(key string, defaultVal time.Duration) time.Duration {
+	seconds, ok := envPositive(key, defaultVal, func(k string) float64 {
+		return common.EnvFloat(k, 0)
+	})
+	if ok {
+		return time.Duration(seconds * float64(time.Second))
+	}
+	return defaultVal
 }
 
 // applyMemoryLimit sets the Go soft memory limit for this process. An explicit

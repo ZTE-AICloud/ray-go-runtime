@@ -89,7 +89,7 @@ func TestMaxLinesPerReadParity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	m.maxLinesPerRead = 3
+	m.numLinesToRead = 3
 
 	if err := m.updateLogFilenames(); err != nil {
 		t.Fatalf("updateLogFilenames() error = %v", err)
@@ -154,7 +154,7 @@ func TestCheckLogFilesAndPublishUpdatesReusesReader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	m.maxLinesPerRead = 1
+	m.numLinesToRead = 1
 	if err := m.updateLogFilenames(); err != nil {
 		t.Fatalf("updateLogFilenames() error = %v", err)
 	}
@@ -188,7 +188,7 @@ func TestCheckLogFilesAndPublishUpdatesTruncatesLongLine(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 	m.maxLineSize = 16
-	m.maxLinesPerRead = 10
+	m.numLinesToRead = 10
 
 	appendLog(t, logPath, strings.Repeat("x", 64)+"\nshort\n")
 	if err := m.updateLogFilenames(); err != nil {
@@ -222,7 +222,7 @@ func TestCheckLogFilesAndPublishUpdatesFlushesOnByteLimit(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 	m.maxLineSize = 1024
-	m.maxLinesPerRead = 100
+	m.numLinesToRead = 100
 	m.maxBatchBytes = 64
 
 	// Three 40-byte lines: the second line pushes the pending batch over the

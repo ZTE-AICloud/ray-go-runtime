@@ -113,7 +113,7 @@ func TestInPlaceRewriteDetected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	m.maxLinesPerRead = 2
+	m.numLinesToRead = 2
 
 	if err := m.updateLogFilenames(); err != nil {
 		t.Fatalf("updateLogFilenames() error = %v", err)

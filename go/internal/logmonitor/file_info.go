@@ -26,7 +26,7 @@ type logFileInfo struct {
 	filePosition       int64
 	fileHandle         *os.File
 	// reader persists across polls so lines left in its buffer when
-	// maxLinesPerRead ends a poll are delivered on the next poll.
+	// numLinesToRead ends a poll are delivered on the next poll.
 	reader       *bufio.Reader
 	isErrFile    bool
 	jobID        string

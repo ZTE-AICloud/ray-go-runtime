@@ -37,7 +37,7 @@ type Monitor struct {
 	maxFilesOpen           int
 	manyFilesThreshold     int
 	nameUpdateInterval     time.Duration
-	maxLinesPerRead        int
+	numLinesToRead         int
 	maxLineSize            int
 	maxBatchBytes          int
 	runtimeEnvToDriver     bool
@@ -55,6 +55,9 @@ type RuntimeConfig struct {
 	AutoscalerV2Enabled bool
 	MaxFilesOpen        int
 	MaxLineSize         int
+	ManyFilesThreshold  int
+	NumLinesToRead      int
+	NameUpdateInterval  time.Duration
 }
 
 func New(ip, logsDir string, publisher Publisher) (*Monitor, error) {
@@ -80,7 +83,7 @@ func New(ip, logsDir string, publisher Publisher) (*Monitor, error) {
 		maxFilesOpen:       defaultMaxFilesOpen,
 		manyFilesThreshold: defaultManyFilesThreshold,
 		nameUpdateInterval: defaultNameUpdateInterval,
-		maxLinesPerRead:    defaultMaxLinesPerRead,
+		numLinesToRead:     defaultNumLinesToRead,
 		maxLineSize:        defaultMaxLineSize,
 		maxBatchBytes:      defaultMaxBatchBytes,
 		isProcAlive:        defaultIsProcAlive,
@@ -101,6 +104,15 @@ func NewWithConfig(ip, logsDir string, publisher Publisher, cfg RuntimeConfig) (
 	}
 	if cfg.MaxLineSize > 0 {
 		m.maxLineSize = cfg.MaxLineSize
+	}
+	if cfg.ManyFilesThreshold > 0 {
+		m.manyFilesThreshold = cfg.ManyFilesThreshold
+	}
+	if cfg.NumLinesToRead > 0 {
+		m.numLinesToRead = cfg.NumLinesToRead
+	}
+	if cfg.NameUpdateInterval > 0 {
+		m.nameUpdateInterval = cfg.NameUpdateInterval
 	}
 	m.runtimeEnvToDriver = cfg.RuntimeEnvToDriver
 	m.autoscalerV2Enabled = cfg.AutoscalerV2Enabled
@@ -366,11 +378,11 @@ func (m *Monitor) checkLogFilesAndPublishUpdates() (bool, error) {
 		}
 
 		// The reader is persistent across polls: lines left in its buffer
-		// when maxLinesPerRead ends this poll stay available for the next
+		// when numLinesToRead ends this poll stay available for the next
 		// poll instead of being skipped.
 		reader := fileInfo.reader
 		truncatedLines := 0
-		for i := 0; i < m.maxLinesPerRead; i++ {
+		for i := 0; i < m.numLinesToRead; i++ {
 			rawLine, truncated, err := readCappedLine(reader, m.maxLineSize)
 			if err != nil && len(rawLine) == 0 {
 				break

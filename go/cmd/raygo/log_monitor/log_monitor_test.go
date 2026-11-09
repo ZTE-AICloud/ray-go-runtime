@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -658,6 +659,114 @@ func TestApplyMemoryLimitHonorsGOMEMLIMIT(t *testing.T) {
 	if got := applyMemoryLimit(); got != int64(128<<20) {
 		t.Fatalf("applyMemoryLimit() env over GOMEMLIMIT = %d, want %d", got, int64(128<<20))
 	}
+}
+
+func TestEnvPositiveInt(t *testing.T) {
+	const key = "RAY_LOG_MONITOR_MAX_OPEN_FILES"
+	tests := []struct {
+		name       string
+		envVal     string
+		unset      bool
+		defaultVal int
+		want       int
+		wantWarn   bool
+	}{
+		{name: "unset falls back to default", unset: true, defaultVal: 200, want: 200, wantWarn: false},
+		{name: "positive value adopted", envVal: "300", defaultVal: 200, want: 300, wantWarn: false},
+		{name: "zero falls back with warning", envVal: "0", defaultVal: 200, want: 200, wantWarn: true},
+		{name: "negative falls back with warning", envVal: "-5", defaultVal: 200, want: 200, wantWarn: true},
+		{name: "non-numeric falls back with warning", envVal: "abc", defaultVal: 200, want: 200, wantWarn: true},
+		{name: "partially parsed falls back with warning", envVal: "5x", defaultVal: 200, want: 200, wantWarn: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.unset {
+				t.Setenv(key, "")
+				os.Unsetenv(key)
+			} else {
+				t.Setenv(key, tt.envVal)
+			}
+			var got int
+			stderr := captureStderrString(t, func() {
+				got = envPositiveInt(key, tt.defaultVal)
+			})
+			if got != tt.want {
+				t.Fatalf("envPositiveInt(%q, %d) = %d, want %d", key, tt.defaultVal, got, tt.want)
+			}
+			if tt.wantWarn && !strings.Contains(stderr, key) {
+				t.Fatalf("expected stderr warning mentioning %q, got %q", key, stderr)
+			}
+			if !tt.wantWarn && stderr != "" {
+				t.Fatalf("unexpected stderr output %q", stderr)
+			}
+		})
+	}
+}
+
+func TestEnvPositiveDuration(t *testing.T) {
+	const key = "LOG_NAME_UPDATE_INTERVAL_S"
+	tests := []struct {
+		name       string
+		envVal     string
+		unset      bool
+		defaultVal time.Duration
+		want       time.Duration
+		wantWarn   bool
+	}{
+		{name: "unset falls back to default", unset: true, defaultVal: 500 * time.Millisecond, want: 500 * time.Millisecond, wantWarn: false},
+		{name: "0.5 converts to 500ms", envVal: "0.5", defaultVal: 500 * time.Millisecond, want: 500 * time.Millisecond, wantWarn: false},
+		{name: "1.5 converts to 1.5s", envVal: "1.5", defaultVal: 500 * time.Millisecond, want: 1500 * time.Millisecond, wantWarn: false},
+		{name: "zero falls back with warning", envVal: "0", defaultVal: 500 * time.Millisecond, want: 500 * time.Millisecond, wantWarn: true},
+		{name: "negative falls back with warning", envVal: "-1", defaultVal: 500 * time.Millisecond, want: 500 * time.Millisecond, wantWarn: true},
+		{name: "non-numeric falls back with warning", envVal: "abc", defaultVal: 500 * time.Millisecond, want: 500 * time.Millisecond, wantWarn: true},
+		{name: "partially parsed falls back with warning", envVal: "5x", defaultVal: 500 * time.Millisecond, want: 500 * time.Millisecond, wantWarn: true},
+		{name: "inf falls back with warning", envVal: "Inf", defaultVal: 500 * time.Millisecond, want: 500 * time.Millisecond, wantWarn: true},
+		{name: "nan falls back with warning", envVal: "NaN", defaultVal: 500 * time.Millisecond, want: 500 * time.Millisecond, wantWarn: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.unset {
+				t.Setenv(key, "")
+				os.Unsetenv(key)
+			} else {
+				t.Setenv(key, tt.envVal)
+			}
+			var got time.Duration
+			stderr := captureStderrString(t, func() {
+				got = envPositiveDuration(key, tt.defaultVal)
+			})
+			if got != tt.want {
+				t.Fatalf("envPositiveDuration(%q, %v) = %v, want %v", key, tt.defaultVal, got, tt.want)
+			}
+			if tt.wantWarn && !strings.Contains(stderr, key) {
+				t.Fatalf("expected stderr warning mentioning %q, got %q", key, stderr)
+			}
+			if !tt.wantWarn && stderr != "" {
+				t.Fatalf("unexpected stderr output %q", stderr)
+			}
+		})
+	}
+}
+
+// captureStderrString runs fn while os.Stderr is redirected to a pipe and
+// returns everything fn wrote to stderr.
+func captureStderrString(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe() error = %v", err)
+	}
+	os.Stderr = w
+	fn()
+	_ = w.Close()
+	os.Stderr = old
+	data, err := io.ReadAll(r)
+	_ = r.Close()
+	if err != nil {
+		t.Fatalf("ReadAll error = %v", err)
+	}
+	return string(data)
 }
 
 func TestParseGOMEMLIMIT(t *testing.T) {
