@@ -136,3 +136,19 @@ func TestReadCappedLineSlowPathOneOverCap(t *testing.T) {
 		t.Fatalf("after readCappedLine() = %q(truncated=%v), %v; want %q, false, nil", line, truncated, err, "next\n")
 	}
 }
+
+// TestReadCappedLineFinalFragmentTruncationAtEOF pins the case where the cap is
+// crossed inside the final buffered fragment and EOF follows immediately with
+// no trailing newline: the bytes dropped by the cap must still be reported even
+// though drainLine then has nothing left to discard. The cap (8) is not a
+// multiple of the reader buffer (16), so ReadSlice returns the whole 16-byte
+// line with ErrBufferFull and appendCapped drops half of it.
+func TestReadCappedLineFinalFragmentTruncationAtEOF(t *testing.T) {
+	const max = 8
+	const bufSize = 16
+	r := bufio.NewReaderSize(strings.NewReader(strings.Repeat("d", bufSize)), bufSize)
+	line, truncated, err := readCappedLine(r, max)
+	if err != nil || !truncated || len(line) != max || line != strings.Repeat("d", max) {
+		t.Fatalf("readCappedLine() = %q(len=%d, truncated=%v), %v; want %d d's, truncated=true, nil", line, len(line), truncated, err, max)
+	}
+}

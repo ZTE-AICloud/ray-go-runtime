@@ -60,7 +60,9 @@ func readCappedLine(r *bufio.Reader, maxLineSize int) (string, bool, error) {
 				if drainLine(r) {
 					return string(line[:maxLineSize]), true, nil
 				}
-				return string(line), false, nil
+				// Nothing left to discard, but appendCapped may already have
+				// dropped bytes inside the final fragment; report that.
+				return string(line), capped, nil
 			}
 		case io.EOF:
 			return string(line), capped, err
