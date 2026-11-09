@@ -45,6 +45,7 @@ const (
 	nodeIPFilename                = "node_ip_address.json"
 	autoscalerStateNamespace      = "__autoscaler"
 	autoscalerV2EnabledKey        = "__autoscaler_v2_enabled"
+	autoscalerV2EnabledEnvVar     = "RAY_enable_autoscaler_v2"
 	runtimeEnvLogToDriverEnvVar   = "RAY_RUNTIME_ENV_LOG_TO_DRIVER_ENABLED"
 	envMaxLineSize                = "RAY_GO_LOG_MONITOR_MAX_LINE_BYTES"
 	envMemoryLimit                = "RAY_GO_LOG_MONITOR_MEMLIMIT"
@@ -241,11 +242,16 @@ func runLogMonitorWithDeps(opts *Options, deps runnerDeps) error {
 	}
 	defer client.Close()
 
-	autoscalerV2, err := detectAutoscalerV2EnabledWithRetry(ctx, deps, func(ctx context.Context) (bool, error) {
-		return detectAutoscalerV2Enabled(ctx, client)
-	})
-	if err != nil {
-		return fmt.Errorf("detect autoscaler v2: %w", err)
+	autoscalerV2 := false
+	if v, ok := autoscalerV2FromEnv(); ok && v {
+		autoscalerV2 = true
+	} else {
+		autoscalerV2, err = detectAutoscalerV2EnabledWithRetry(ctx, deps, func(ctx context.Context) (bool, error) {
+			return detectAutoscalerV2Enabled(ctx, client)
+		})
+		if err != nil {
+			return fmt.Errorf("detect autoscaler v2: %w", err)
+		}
 	}
 
 	monitor, err := deps.newMonitor(
@@ -514,6 +520,19 @@ func detectAutoscalerV2EnabledWithRetry(ctx context.Context, deps runnerDeps, de
 		return false, err
 	}
 	return enabled, nil
+}
+
+// autoscalerV2FromEnv reads RAY_enable_autoscaler_v2 (aligned with Python
+// ray._config.enable_autoscaler_v2() and the C++ RayConfig bool semantics:
+// "true"/"1" mean enabled). The second return value reports whether the
+// environment variable is set at all.
+func autoscalerV2FromEnv() (bool, bool) {
+	v, ok := os.LookupEnv(autoscalerV2EnabledEnvVar)
+	if !ok {
+		return false, false
+	}
+	lv := strings.ToLower(strings.TrimSpace(v))
+	return lv == "true" || lv == "1", true
 }
 
 func detectAutoscalerV2Enabled(ctx context.Context, client gcsClient) (bool, error) {

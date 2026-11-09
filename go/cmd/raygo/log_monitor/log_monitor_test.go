@@ -490,6 +490,129 @@ func TestRunLogMonitorSkipsPlugin(t *testing.T) {
 	}
 }
 
+func TestAutoscalerV2FromEnv(t *testing.T) {
+	tests := []struct {
+		name    string
+		envVal  string
+		unset   bool
+		want    bool
+		wantSet bool
+	}{
+		{name: "unset", unset: true, want: false, wantSet: false},
+		{name: "one", envVal: "1", want: true, wantSet: true},
+		{name: "true", envVal: "true", want: true, wantSet: true},
+		{name: "true uppercase", envVal: "TRUE", want: true, wantSet: true},
+		{name: "true with surrounding whitespace", envVal: " true ", want: true, wantSet: true},
+		// A present but falsy value is still reported as set; only the enabled
+		// result is false, so the v2 detection falls through to the GCS KV.
+		{name: "zero", envVal: "0", want: false, wantSet: true},
+		{name: "false", envVal: "false", want: false, wantSet: true},
+		{name: "garbage", envVal: "enabled", want: false, wantSet: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.unset {
+				t.Setenv(autoscalerV2EnabledEnvVar, "")
+				os.Unsetenv(autoscalerV2EnabledEnvVar)
+			} else {
+				t.Setenv(autoscalerV2EnabledEnvVar, tt.envVal)
+			}
+			got, set := autoscalerV2FromEnv()
+			if got != tt.want || set != tt.wantSet {
+				t.Fatalf("autoscalerV2FromEnv() = (%v, %v), want (%v, %v)", got, set, tt.want, tt.wantSet)
+			}
+		})
+	}
+}
+
+// countingGCSClient wraps fakeGCSClient and counts GCS KV Get calls so a test
+// can assert that autoscaler v2 detection never queries GCS when the
+// RAY_enable_autoscaler_v2 environment variable short-circuits.
+type countingGCSClient struct {
+	*fakeGCSClient
+	gets int
+}
+
+func (c *countingGCSClient) Get(ctx context.Context, ns, key string) ([]byte, error) {
+	c.gets++
+	return c.fakeGCSClient.Get(ctx, ns, key)
+}
+
+// TestRunLogMonitorAutoscalerV2EnvShortCircuit verifies that
+// runLogMonitorWithDeps only short-circuits on a truthy
+// RAY_enable_autoscaler_v2 ("1"/"true"): the env value is passed straight
+// through to newMonitor without querying the GCS internal KV. A falsy or
+// unset env falls through to the GCS KV detection path, so the env can never
+// disable a server-side true.
+func TestRunLogMonitorAutoscalerV2EnvShortCircuit(t *testing.T) {
+	tests := []struct {
+		name     string
+		envVal   string
+		unset    bool
+		wantV2   bool
+		wantGets int
+	}{
+		{name: "env one short-circuits to true", envVal: "1", wantV2: true, wantGets: 0},
+		{name: "env true short-circuits to true", envVal: "true", wantV2: true, wantGets: 0},
+		{name: "env zero falls through to KV", envVal: "0", wantV2: false, wantGets: 1},
+		{name: "env false falls through to KV", envVal: "false", wantV2: false, wantGets: 1},
+		{name: "env garbage falls through to KV", envVal: "yes", wantV2: false, wantGets: 1},
+		{name: "unset falls through to KV", unset: true, wantV2: false, wantGets: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.unset {
+				t.Setenv(autoscalerV2EnabledEnvVar, "")
+				os.Unsetenv(autoscalerV2EnabledEnvVar)
+			} else {
+				t.Setenv(autoscalerV2EnabledEnvVar, tt.envVal)
+			}
+
+			client := &countingGCSClient{fakeGCSClient: &fakeGCSClient{values: map[string][]byte{}}}
+
+			monitorStarted := make(chan struct{}, 1)
+			var gotAutoscalerV2 *bool
+			deps := runnerDeps{
+				connectGCSClient: func(context.Context, gcs.ClientOptions) (gcsClient, error) {
+					return client, nil
+				},
+				retryTimeout: 50 * time.Millisecond,
+				retryDelay:   time.Millisecond,
+				newMonitor: func(ip string, opts *Options, publisher logmonitor.Publisher, autoscalerV2 bool, runtimeEnvToDriver bool) (monitorRunner, error) {
+					gotAutoscalerV2 = &autoscalerV2
+					return &fakeMonitorRunner{started: monitorStarted}, nil
+				},
+			}
+
+			opts := &Options{
+				SessionDir:    t.TempDir(),
+				LogsDir:       t.TempDir(),
+				GCSAddress:    "127.0.0.1:6379",
+				ClusterIDHex:  "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c",
+				NodeIPAddress: "127.0.0.1",
+				Logging:       LoggingConfig{Level: "info", Filename: ""},
+			}
+			if err := runLogMonitorWithDeps(opts, deps); err != nil {
+				t.Fatalf("runLogMonitorWithDeps error = %v", err)
+			}
+			if gotAutoscalerV2 == nil {
+				t.Fatal("newMonitor was not called")
+			}
+			if *gotAutoscalerV2 != tt.wantV2 {
+				t.Fatalf("newMonitor got autoscalerV2 = %v, want %v", *gotAutoscalerV2, tt.wantV2)
+			}
+			if client.gets != tt.wantGets {
+				t.Fatalf("GCS autoscaler v2 detection performed %d Get calls, want %d", client.gets, tt.wantGets)
+			}
+			select {
+			case <-monitorStarted:
+			default:
+				t.Fatal("monitor was not started")
+			}
+		})
+	}
+}
+
 func TestApplyMemoryLimitDefaultAndEnv(t *testing.T) {
 	// Restore the process soft memory limit whether the test passes or fails,
 	// so a 64 MiB limit is never left behind in the test binary.
