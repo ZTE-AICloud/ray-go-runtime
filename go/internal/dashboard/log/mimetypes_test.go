@@ -27,4 +27,5 @@ func TestContentTypeFor(t *testing.T) {
 	assert.Equal(t, "application/octet-stream", contentTypeFor("file.unknown"))
 	assert.Equal(t, "application/octet-stream", contentTypeFor("noext"))
 	assert.Equal(t, "image/png", contentTypeFor("a.png"))
+	assert.Equal(t, "text/javascript", contentTypeFor("a.js"))
 }

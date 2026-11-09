@@ -23,6 +23,8 @@ import (
 // static file handler reports for it. Python resolves the type through the
 // mimetypes module; the entries aiohttp can produce for log-browser files are
 // reproduced here so the Go agent serves the same headers without a dependency.
+// The values follow Python 3.12+, the oldest interpreter Ray supports, where
+// JavaScript maps to text/javascript (older Pythons used application/javascript).
 var contentTypes = map[string]string{
 	".3g2":         "audio/3gpp2",
 	".3gp":         "audio/3gpp",
@@ -74,7 +76,7 @@ var contentTypes = map[string]string{
 	".jpe":         "image/jpeg",
 	".jpeg":        "image/jpeg",
 	".jpg":         "image/jpeg",
-	".js":          "application/javascript",
+	".js":          "text/javascript",
 	".json":        "application/json",
 	".ksh":         "text/plain",
 	".latex":       "application/x-latex",
@@ -87,7 +89,7 @@ var contentTypes = map[string]string{
 	".mht":         "message/rfc822",
 	".mhtml":       "message/rfc822",
 	".mif":         "application/x-mif",
-	".mjs":         "application/javascript",
+	".mjs":         "text/javascript",
 	".mov":         "video/quicktime",
 	".movie":       "video/x-sgi-movie",
 	".mp2":         "audio/mpeg",

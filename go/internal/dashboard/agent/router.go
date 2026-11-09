@@ -91,7 +91,7 @@ func (rt *aiohttpRouter) isTrailingSlashRedirect(pattern string, r *http.Request
 	if !strings.HasSuffix(pattern, "/") {
 		return false
 	}
-	path := r.URL.EscapedPath()
+	path := r.URL.Path
 	return !strings.HasSuffix(path, "/") && path+"/" == pattern
 }
 

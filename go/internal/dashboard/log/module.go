@@ -104,6 +104,11 @@ func (a *LogAgentModule) ListLogs(ctx context.Context, req *proto.ListLogsReques
 			"could not find log dir at path: %s. It is unexpected. Please report an issue to Ray Github.",
 			a.logDir))
 	}
+	if req.GlobFilter != "" && !safeGlobFilter(req.GlobFilter) {
+		return nil, status.Error(codes.InvalidArgument, fmt.Sprintf(
+			"Invalid glob filter: %s. It must be a relative path and cannot contain '..'.",
+			req.GlobFilter))
+	}
 	matches, err := globLogFiles(a.logDir, req.GlobFilter)
 	if err != nil {
 		return nil, status.Error(codes.Unknown, err.Error())

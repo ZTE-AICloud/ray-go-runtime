@@ -238,11 +238,23 @@ func TestListLogs(t *testing.T) {
 		}
 	})
 	t.Run("absolute glob is rejected", func(t *testing.T) {
-		// Python raises NotImplementedError for non-relative patterns and lets
-		// it escape, so grpc surfaces UNKNOWN.
+		// LogAgentV1Grpc.ListLogs aborts with INVALID_ARGUMENT before globbing
+		// when the filter has an anchor (log_agent.py:296-303).
 		_, err := la.ListLogs(ctx, &proto.ListLogsRequest{GlobFilter: "/etc/passwd"})
-		if status.Code(err) != codes.Unknown {
-			t.Errorf("ListLogs absolute glob error code = %v, want Unknown", status.Code(err))
+		if status.Code(err) != codes.InvalidArgument {
+			t.Errorf("ListLogs absolute glob error code = %v, want InvalidArgument", status.Code(err))
+		}
+		if want := "Invalid glob filter: /etc/passwd. It must be a relative path and cannot contain '..'."; status.Convert(err).Message() != want {
+			t.Errorf("ListLogs absolute glob message = %q, want %q", status.Convert(err).Message(), want)
+		}
+	})
+	t.Run("parent traversal glob is rejected", func(t *testing.T) {
+		_, err := la.ListLogs(ctx, &proto.ListLogsRequest{GlobFilter: "sub/../x"})
+		if status.Code(err) != codes.InvalidArgument {
+			t.Errorf("ListLogs traversal glob error code = %v, want InvalidArgument", status.Code(err))
+		}
+		if want := "Invalid glob filter: sub/../x. It must be a relative path and cannot contain '..'."; status.Convert(err).Message() != want {
+			t.Errorf("ListLogs traversal glob message = %q, want %q", status.Convert(err).Message(), want)
 		}
 	})
 }

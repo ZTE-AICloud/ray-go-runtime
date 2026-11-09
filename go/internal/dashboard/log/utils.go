@@ -81,10 +81,28 @@ func inside(base, path string) bool {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && rel != ""
 }
 
+// safeGlobFilter reports whether a ListLogs glob filter is a relative path
+// without a ".." segment, mirroring the anchor and ".." checks
+// LogAgentV1Grpc.ListLogs performs before globbing (log_agent.py:296-303).
+func safeGlobFilter(filter string) bool {
+	if filepath.IsAbs(filter) || strings.HasPrefix(filter, "/") {
+		return false
+	}
+	for _, part := range strings.FieldsFunc(filter, func(r rune) bool {
+		return r == '/' || r == '\\'
+	}) {
+		if part == ".." {
+			return false
+		}
+	}
+	return true
+}
+
 // globLogFiles returns the paths under logDir matching a pathlib-style glob.
 // A "**" segment spans directories recursively, which filepath.Glob cannot
 // express; this is what LogAgentV1Grpc.ListLogs globs with in Python. Absolute
-// patterns are unsupported, matching pathlib's NotImplementedError.
+// patterns are refused here as defense in depth; ListLogs rejects unsafe
+// filters up front with InvalidArgument.
 func globLogFiles(logDir, pattern string) ([]string, error) {
 	if filepath.IsAbs(pattern) {
 		return nil, fmt.Errorf("Non-relative patterns are unsupported")

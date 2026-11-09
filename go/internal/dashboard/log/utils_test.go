@@ -100,6 +100,16 @@ func TestFnmatchSegmentToRegex(t *testing.T) {
 	assert.Equal(t, `[ab]`, fnmatchSegmentToRegex("[ab]"))
 }
 
+func TestSafeGlobFilter(t *testing.T) {
+	assert.True(t, safeGlobFilter("*.log"))
+	assert.True(t, safeGlobFilter("sub/**/*.log"))
+	assert.True(t, safeGlobFilter("a..b"))
+	assert.False(t, safeGlobFilter("/etc/passwd"))
+	assert.False(t, safeGlobFilter("sub/../x"))
+	assert.False(t, safeGlobFilter(".."))
+	assert.False(t, safeGlobFilter("sub/.."))
+}
+
 func TestGlobLogFiles(t *testing.T) {
 	root := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "sub"), 0o755))
