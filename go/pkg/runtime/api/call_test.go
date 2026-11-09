@@ -139,6 +139,54 @@ func TestWrapPythonArgsStampsCrossLanguageMetadata(t *testing.T) {
 	}
 }
 
+// TestPythonActorCreatorBuilders pins the options recorded by the cross-language
+// actor builder methods: detached lifetime, async mode, and head-node affinity
+// are all required by the dashboard agent job module's supervisor actors.
+func TestPythonActorCreatorBuilders(t *testing.T) {
+	creator := RemotePythonActor("m", "C").
+		WithLifetime(submitter.ActorLifetimeDetached).
+		WithAsync(true).
+		WithNodeAffinity("abc", false)
+	if creator.err != nil {
+		t.Fatalf("RemotePythonActor returned error: %v", creator.err)
+	}
+	if creator.options.Lifetime != submitter.ActorLifetimeDetached {
+		t.Errorf("Lifetime = %v, want Detached", creator.options.Lifetime)
+	}
+	if !creator.options.IsAsync {
+		t.Error("IsAsync = false, want true")
+	}
+	if creator.options.NodeAffinity == nil {
+		t.Fatal("NodeAffinity = nil after WithNodeAffinity")
+	}
+	if creator.options.NodeAffinity.NodeID != "abc" {
+		t.Errorf("NodeAffinity.NodeID = %q, want %q", creator.options.NodeAffinity.NodeID, "abc")
+	}
+	if creator.options.NodeAffinity.Soft {
+		t.Error("NodeAffinity.Soft = true, want false")
+	}
+}
+
+// TestPythonActorTaskCallerWithMaxRetries pins the retry option used by the
+// supervisor ping, which must retry until the actor is reachable.
+func TestPythonActorTaskCallerWithMaxRetries(t *testing.T) {
+	handle := &PythonActorHandle{
+		baseActorHandle: baseActorHandle{nativeHandle: object.NewNativeActorHandle(ids.NilActorID(), object.LanguagePython)},
+		moduleName:      "m",
+		className:       "C",
+	}
+	caller := ActorTask[struct{}](handle, "ping").WithMaxRetries(-1)
+	if caller.err != nil {
+		t.Fatalf("ActorTask returned error: %v", caller.err)
+	}
+	if caller.options.RetryPolicy == nil {
+		t.Fatal("RetryPolicy = nil after WithMaxRetries")
+	}
+	if caller.options.RetryPolicy.MaxRetries != -1 {
+		t.Errorf("RetryPolicy.MaxRetries = %d, want -1", caller.options.RetryPolicy.MaxRetries)
+	}
+}
+
 func TestActorOptionsNewBuilders(t *testing.T) {
 	type actor struct{}
 	creator := Actor[*actor](nil)

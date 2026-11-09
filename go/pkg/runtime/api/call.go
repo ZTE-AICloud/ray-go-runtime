@@ -1100,6 +1100,44 @@ func (c *PythonActorCreator) WithMaxConcurrency(maxConcurrency int) *PythonActor
 	return c
 }
 
+// WithLifetime sets the actor lifetime (detached or non-detached).
+//
+// Parameters:
+//   - lifetime: The actor lifetime.
+//
+// Returns:
+//   - *PythonActorCreator: The same actor creator for chaining.
+func (c *PythonActorCreator) WithLifetime(lifetime submitter.ActorLifetime) *PythonActorCreator {
+	c.options.Lifetime = lifetime
+	return c
+}
+
+// WithAsync sets whether the Python actor uses async direct call mode.
+//
+// Parameters:
+//   - async: Whether the actor is async.
+//
+// Returns:
+//   - *PythonActorCreator: The same actor creator for chaining.
+func (c *PythonActorCreator) WithAsync(async bool) *PythonActorCreator {
+	c.options.IsAsync = async
+	return c
+}
+
+// WithNodeAffinity pins the Python actor to the given node.
+//
+// Parameters:
+//   - nodeID: The target node ID as a hex string.
+//   - soft: When true, the scheduler may spill to another node if the target
+//     node is unavailable.
+//
+// Returns:
+//   - *PythonActorCreator: The same actor creator for chaining.
+func (c *PythonActorCreator) WithNodeAffinity(nodeID string, soft bool) *PythonActorCreator {
+	c.options.NodeAffinity = &submitter.NodeAffinityOptions{NodeID: nodeID, Soft: soft}
+	return c
+}
+
 // Create creates the Python actor with the provided constructor arguments.
 //
 // Parameters:
@@ -1275,6 +1313,19 @@ func (c *PythonActorTaskCaller[T]) WithConcurrencyGroup(groupName string) *Pytho
 //   - *PythonActorTaskCaller[T]: The same caller for chaining
 func (c *PythonActorTaskCaller[T]) WithNumReturns(numReturns int) *PythonActorTaskCaller[T] {
 	c.numReturns = numReturns
+	return c
+}
+
+// WithMaxRetries sets the maximum number of retries for the Python actor
+// method call. -1 means unlimited retries.
+//
+// Parameters:
+//   - maxRetries: The maximum number of retries
+//
+// Returns:
+//   - *PythonActorTaskCaller[T]: The same caller for chaining
+func (c *PythonActorTaskCaller[T]) WithMaxRetries(maxRetries int) *PythonActorTaskCaller[T] {
+	c.options.RetryPolicy = &submitter.RetryPolicy{MaxRetries: maxRetries}
 	return c
 }
 
