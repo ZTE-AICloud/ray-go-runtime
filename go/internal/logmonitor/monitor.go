@@ -15,7 +15,6 @@
 package logmonitor
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"io/fs"
@@ -39,9 +38,12 @@ type Monitor struct {
 	manyFilesThreshold     int
 	nameUpdateInterval     time.Duration
 	maxLinesPerRead        int
+	maxLineSize            int
+	maxBatchBytes          int
 	runtimeEnvToDriver     bool
 	autoscalerV2Enabled    bool
 	lastFilenameUpdateTime time.Time
+	lastPublishErrLog      time.Time
 	isProcAlive            func(pid int) bool
 	sleep                  func(time.Duration)
 }
@@ -51,6 +53,7 @@ type RuntimeConfig struct {
 	RuntimeEnvToDriver  bool
 	AutoscalerV2Enabled bool
 	MaxFilesOpen        int
+	MaxLineSize         int
 }
 
 func New(ip, logsDir string, publisher Publisher) (*Monitor, error) {
@@ -77,6 +80,8 @@ func New(ip, logsDir string, publisher Publisher) (*Monitor, error) {
 		manyFilesThreshold: defaultManyFilesThreshold,
 		nameUpdateInterval: defaultNameUpdateInterval,
 		maxLinesPerRead:    defaultMaxLinesPerRead,
+		maxLineSize:        defaultMaxLineSize,
+		maxBatchBytes:      defaultMaxBatchBytes,
 		isProcAlive:        defaultIsProcAlive,
 		sleep:              time.Sleep,
 	}, nil
@@ -90,6 +95,9 @@ func NewWithConfig(ip, logsDir string, publisher Publisher, cfg RuntimeConfig) (
 	}
 	if cfg.MaxFilesOpen > 0 {
 		m.maxFilesOpen = cfg.MaxFilesOpen
+	}
+	if cfg.MaxLineSize > 0 {
+		m.maxLineSize = cfg.MaxLineSize
 	}
 	m.runtimeEnvToDriver = cfg.RuntimeEnvToDriver
 	m.autoscalerV2Enabled = cfg.AutoscalerV2Enabled
@@ -286,6 +294,7 @@ func pythonBool(v bool) string {
 
 func (m *Monitor) checkLogFilesAndPublishUpdates() (bool, error) {
 	anythingPublished := false
+	logger := log.WithName("logmonitor")
 
 	for _, fileInfo := range m.openFiles {
 		if err := fileInfo.reopenIfNecessary(); err != nil && !os.IsNotExist(err) {
@@ -293,6 +302,7 @@ func (m *Monitor) checkLogFilesAndPublishUpdates() (bool, error) {
 		}
 
 		pending := make([]string, 0, 16)
+		pendingBytes := 0
 		flush := func() error {
 			if len(pending) == 0 {
 				return nil
@@ -306,28 +316,37 @@ func (m *Monitor) checkLogFilesAndPublishUpdates() (bool, error) {
 				ActorName: fileInfo.actorName,
 				TaskName:  fileInfo.taskName,
 			}); err != nil {
-				anythingPublished = true
-				pending = pending[:0]
-				return nil
+				// Matches the Python log_monitor.py flush(): a failed publish
+				// still counts as "published" so the Run loop keeps polling
+				// (parity behavior, verified by the *Parity tests). The error
+				// itself is logged at most once per interval so a prolonged
+				// GCS outage does not flood log_monitor.log from every open
+				// file on every scan cycle.
+				if time.Since(m.lastPublishErrLog) >= publishErrorLogInterval {
+					logger.Error(err, "drop log batch after publish failure", "lines", len(pending))
+					m.lastPublishErrLog = time.Now()
+				}
 			}
 			anythingPublished = true
 			pending = pending[:0]
+			pendingBytes = 0
 			return nil
 		}
 
 		// The reader is persistent across polls: lines left in its buffer
 		// when maxLinesPerRead ends this poll stay available for the next
 		// poll instead of being skipped.
-		if fileInfo.reader == nil {
-			fileInfo.reader = bufio.NewReader(fileInfo.fileHandle)
-		}
+		reader := fileInfo.reader
+		truncatedLines := 0
 		for i := 0; i < m.maxLinesPerRead; i++ {
-			line, err := fileInfo.reader.ReadString('\n')
-			if err != nil && line == "" {
+			rawLine, truncated, err := readCappedLine(reader, m.maxLineSize)
+			if err != nil && len(rawLine) == 0 {
 				break
 			}
-			fileInfo.consumedBytes += int64(len(line))
-			line = strings.TrimRight(line, "\r\n")
+			if truncated {
+				truncatedLines++
+			}
+			line := strings.TrimRight(rawLine, "\r\n")
 			switch {
 			case strings.HasPrefix(line, logPrefixActorName):
 				if err := flush(); err != nil {
@@ -343,19 +362,35 @@ func (m *Monitor) checkLogFilesAndPublishUpdates() (bool, error) {
 			case strings.HasPrefix(line, logPrefixJobID):
 				fileInfo.jobID = strings.TrimPrefix(line, logPrefixJobID)
 			case line == windowsAccessViolationLine:
-				if skipped, _ := fileInfo.reader.ReadString('\n'); skipped != "" {
-					fileInfo.consumedBytes += int64(len(skipped))
-				}
+				_, _, _ = readCappedLine(reader, m.maxLineSize)
 			case line == "":
 				pending = append(pending, "")
+				pendingBytes++
 			default:
 				pending = append(pending, line)
+				pendingBytes += len(line) + 1
+			}
+			if pendingBytes >= m.maxBatchBytes {
+				if err := flush(); err != nil {
+					return false, err
+				}
 			}
 		}
 
-		fileInfo.filePosition = fileInfo.consumedBytes
+		// Record the exact consumed position: the OS offset minus bytes still
+		// buffered inside the reader. Reusing the reader makes this precise.
+		offset, _ := fileInfo.fileHandle.Seek(0, 1)
+		fileInfo.filePosition = offset - int64(reader.Buffered())
 		if err := flush(); err != nil {
 			return false, err
+		}
+		if truncatedLines > 0 {
+			// Aggregate per file per scan cycle so a file with many over-long
+			// lines logs once instead of flooding log_monitor.log per line.
+			logger.Info("truncated over-long log lines",
+				"file", fileInfo.filename,
+				"max_line_size", m.maxLineSize,
+				"count", truncatedLines)
 		}
 	}
 

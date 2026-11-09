@@ -37,12 +37,20 @@ const (
 	logPrefixTaskName          = ":task_name:"
 	logPrefixJobID             = ":job_id:"
 	windowsAccessViolationLine = "Windows fatal exception: access violation"
+	defaultMaxLineSize         = 1 << 20  // 1 MiB; lines longer than this are truncated.
+	defaultReadBufferSize      = 16 << 10 // 16 KiB; per-open-file reader buffer.
+	defaultMaxBatchBytes       = 16 << 20 // 16 MiB; a pending batch larger than this is flushed early.
+	publishErrorLogInterval    = 10 * time.Second
 )
 
 var (
 	workerLogPattern       = regexp.MustCompile(`.*worker.*-([0-9a-f]+)-(\d+)`)
 	runtimeEnvSetupPattern = regexp.MustCompile(`.*runtime_env_setup-(\d+)\.log`)
 )
+
+// DefaultMaxLineSize returns the default per-line size cap applied by the
+// monitor when RuntimeConfig.MaxLineSize is unset.
+func DefaultMaxLineSize() int { return defaultMaxLineSize }
 
 func parseWorkerFilename(path string) (string, *int, bool) {
 	match := workerLogPattern.FindStringSubmatch(path)

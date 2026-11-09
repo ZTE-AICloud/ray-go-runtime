@@ -16,6 +16,7 @@ package logmonitor
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -141,5 +142,114 @@ func TestMaxLinesPerReadParity(t *testing.T) {
 	}
 	if total != 5 {
 		t.Fatalf("total published lines = %d, want 5", total)
+	}
+}
+
+func TestCheckLogFilesAndPublishUpdatesReusesReader(t *testing.T) {
+	logsDir := t.TempDir()
+	publisher := &recordingPublisher{}
+	createLogFile(t, logsDir, "raylet.err", "line1\nline2\n")
+
+	m, err := New("127.0.0.1", logsDir, publisher)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	m.maxLinesPerRead = 1
+	if err := m.updateLogFilenames(); err != nil {
+		t.Fatalf("updateLogFilenames() error = %v", err)
+	}
+	if err := m.openClosedFiles(); err != nil {
+		t.Fatalf("openClosedFiles() error = %v", err)
+	}
+
+	// Each pass reads at most 1 line; the reader must be reused so no line is
+	// lost across iterations (the old per-pass bufio.Reader dropped buffered
+	// lines when the OS offset ran ahead of consumed bytes).
+	for i := 0; i < 2; i++ {
+		if _, err := m.checkLogFilesAndPublishUpdates(); err != nil {
+			t.Fatalf("checkLogFilesAndPublishUpdates() pass %d error = %v", i, err)
+		}
+	}
+	if got := len(publisher.batches); got != 2 {
+		t.Fatalf("len(batches) = %d, want 2 (line1 then line2)", got)
+	}
+	if publisher.batches[0].Lines[0] != "line1" || publisher.batches[1].Lines[0] != "line2" {
+		t.Fatalf("batches = %#v, want [[line1] [line2]]", publisher.batches)
+	}
+}
+
+func TestCheckLogFilesAndPublishUpdatesTruncatesLongLine(t *testing.T) {
+	logsDir := t.TempDir()
+	publisher := &recordingPublisher{}
+	logPath := createLogFile(t, logsDir, "worker-6df6d5dd-01000000-47660.out", "")
+
+	m, err := New("127.0.0.1", logsDir, publisher)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	m.maxLineSize = 16
+	m.maxLinesPerRead = 10
+
+	appendLog(t, logPath, strings.Repeat("x", 64)+"\nshort\n")
+	if err := m.updateLogFilenames(); err != nil {
+		t.Fatalf("updateLogFilenames() error = %v", err)
+	}
+	if err := m.openClosedFiles(); err != nil {
+		t.Fatalf("openClosedFiles() error = %v", err)
+	}
+	if _, err := m.checkLogFilesAndPublishUpdates(); err != nil {
+		t.Fatalf("checkLogFilesAndPublishUpdates() error = %v", err)
+	}
+
+	if len(publisher.batches) != 1 || len(publisher.batches[0].Lines) != 2 {
+		t.Fatalf("batches = %#v, want one batch with two lines", publisher.batches)
+	}
+	if got := publisher.batches[0].Lines[0]; len(got) != 16 {
+		t.Fatalf("long line truncated to %d bytes, want 16", len(got))
+	}
+	if got := publisher.batches[0].Lines[1]; got != "short" {
+		t.Fatalf("second line = %q, want %q", got, "short")
+	}
+}
+
+func TestCheckLogFilesAndPublishUpdatesFlushesOnByteLimit(t *testing.T) {
+	logsDir := t.TempDir()
+	publisher := &recordingPublisher{}
+	logPath := createLogFile(t, logsDir, "worker-6df6d5dd-01000000-47660.out", "")
+
+	m, err := New("127.0.0.1", logsDir, publisher)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	m.maxLineSize = 1024
+	m.maxLinesPerRead = 100
+	m.maxBatchBytes = 64
+
+	// Three 40-byte lines: the second line pushes the pending batch over the
+	// 64-byte cap and must flush the first two lines early; the third line is
+	// then flushed at the end of the pass.
+	appendLog(t, logPath,
+		strings.Repeat("x", 40)+"\n"+
+			strings.Repeat("y", 40)+"\n"+
+			strings.Repeat("z", 40)+"\n")
+	if err := m.updateLogFilenames(); err != nil {
+		t.Fatalf("updateLogFilenames() error = %v", err)
+	}
+	if err := m.openClosedFiles(); err != nil {
+		t.Fatalf("openClosedFiles() error = %v", err)
+	}
+	if _, err := m.checkLogFilesAndPublishUpdates(); err != nil {
+		t.Fatalf("checkLogFilesAndPublishUpdates() error = %v", err)
+	}
+
+	if len(publisher.batches) != 2 {
+		t.Fatalf("len(batches) = %d, want 2 (flushed on byte cap)", len(publisher.batches))
+	}
+	if got := publisher.batches[0].Lines; len(got) != 2 ||
+		got[0] != strings.Repeat("x", 40) || got[1] != strings.Repeat("y", 40) {
+		t.Fatalf("first batch = %#v, want [40 x's, 40 y's]", got)
+	}
+	if got := publisher.batches[1].Lines; len(got) != 1 || got[0] != strings.Repeat("z", 40) {
+		t.Fatalf("second batch = %#v, want [40 z's]", got)
 	}
 }
