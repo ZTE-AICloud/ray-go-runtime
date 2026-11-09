@@ -35,7 +35,7 @@ type Client struct {
 	conn      *grpc.ClientConn
 	clusterID string
 	kv        proto.InternalKVGcsServiceClient
-	pubsub    proto.InternalPubSubGcsServiceClient
+	pubsub    proto.ObservabilityPubSubServiceClient
 }
 
 // NewClient dials GCS and initializes the KV and pubsub service clients.
@@ -67,7 +67,12 @@ func NewClient(ctx context.Context, opts gcs.ClientOptions) (*Client, error) {
 		conn:      conn,
 		clusterID: opts.ClusterID.Hex(),
 		kv:        proto.NewInternalKVGcsServiceClient(conn),
-		pubsub:    proto.NewInternalPubSubGcsServiceClient(conn),
+		// The GCS server registers ObservabilityPubSubService
+		// (src/ray/gcs/grpc_services.cc), the same service the Python
+		// subscriber uses. InternalPubSubGcsService exists only in the proto
+		// and is never registered by this fork's server, so publishing
+		// through it fails with Unimplemented.
+		pubsub: proto.NewObservabilityPubSubServiceClient(conn),
 	}, nil
 }
 
@@ -100,9 +105,10 @@ func (c *Client) Get(ctx context.Context, ns, key string) ([]byte, error) {
 	return reply.Value, nil
 }
 
-// PublishLogBatch publishes one log batch on the RAY_LOG_CHANNEL, matching the
-// wire format of the C++ PublisherAccessor::PublishLogs
-// (src/ray/gcs_rpc_client/accessor.cc): channel, key_id and log_batch_message.
+// PublishLogBatch publishes one log batch on the RAY_LOG_CHANNEL through the
+// ObservabilityPubSubService, matching the wire format of the C++
+// PublisherAccessor::PublishLogs (src/ray/gcs_rpc_client/accessor.cc): channel,
+// key_id and log_batch_message.
 func (c *Client) PublishLogBatch(ctx context.Context, payload gcs.LogBatchPayload) error {
 	req := &proto.GcsPublishRequest{
 		PubMessages: []*proto.PubMessage{{

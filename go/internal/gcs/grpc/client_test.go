@@ -31,7 +31,7 @@ import (
 
 type fakeGCS struct {
 	proto.UnimplementedInternalKVGcsServiceServer
-	proto.UnimplementedInternalPubSubGcsServiceServer
+	proto.UnimplementedObservabilityPubSubServiceServer
 	kvValue    []byte
 	kvNotFound bool
 	kvErr      error
@@ -68,7 +68,7 @@ func startMockGCS(t *testing.T, f *fakeGCS) string {
 	}
 	server := grpc.NewServer()
 	proto.RegisterInternalKVGcsServiceServer(server, f)
-	proto.RegisterInternalPubSubGcsServiceServer(server, f)
+	proto.RegisterObservabilityPubSubServiceServer(server, f)
 	go func() { _ = server.Serve(lis) }()
 	t.Cleanup(server.Stop)
 	return lis.Addr().String()
@@ -83,7 +83,7 @@ func newTestClient(t *testing.T, f *fakeGCS) *Client {
 		t.Fatalf("dial: %v", err)
 	}
 	t.Cleanup(func() { _ = cc.Close() })
-	return &Client{conn: cc, kv: proto.NewInternalKVGcsServiceClient(cc), pubsub: proto.NewInternalPubSubGcsServiceClient(cc)}
+	return &Client{conn: cc, kv: proto.NewInternalKVGcsServiceClient(cc), pubsub: proto.NewObservabilityPubSubServiceClient(cc)}
 }
 
 func TestGetNotFound(t *testing.T) {
@@ -178,7 +178,7 @@ func TestPublishLogBatchSendsClusterIDMetadata(t *testing.T) {
 		conn:      cc,
 		clusterID: "abc123",
 		kv:        proto.NewInternalKVGcsServiceClient(cc),
-		pubsub:    proto.NewInternalPubSubGcsServiceClient(cc),
+		pubsub:    proto.NewObservabilityPubSubServiceClient(cc),
 	}
 
 	if err := c.PublishLogBatch(context.Background(), gcs.LogBatchPayload{JobID: "01000000", Lines: []string{"l1"}}); err != nil {
