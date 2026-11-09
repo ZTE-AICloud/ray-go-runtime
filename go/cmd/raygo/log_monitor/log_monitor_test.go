@@ -721,6 +721,8 @@ func TestEnvPositiveDuration(t *testing.T) {
 		{name: "non-numeric falls back with warning", envVal: "abc", defaultVal: 500 * time.Millisecond, want: 500 * time.Millisecond, wantWarn: true},
 		{name: "partially parsed falls back with warning", envVal: "5x", defaultVal: 500 * time.Millisecond, want: 500 * time.Millisecond, wantWarn: true},
 		{name: "inf falls back with warning", envVal: "Inf", defaultVal: 500 * time.Millisecond, want: 500 * time.Millisecond, wantWarn: true},
+		{name: "overflowing seconds falls back with warning", envVal: "1e10", defaultVal: 500 * time.Millisecond, want: 500 * time.Millisecond, wantWarn: true},
+		{name: "underflowing seconds falls back with warning", envVal: "1e-12", defaultVal: 500 * time.Millisecond, want: 500 * time.Millisecond, wantWarn: true},
 		{name: "nan falls back with warning", envVal: "NaN", defaultVal: 500 * time.Millisecond, want: 500 * time.Millisecond, wantWarn: true},
 	}
 	for _, tt := range tests {

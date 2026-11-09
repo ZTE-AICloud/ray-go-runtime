@@ -70,7 +70,7 @@ func NewClient(ctx context.Context, opts gcs.ClientOptions) (*Client, error) {
 		// The GCS server registers ObservabilityPubSubService
 		// (src/ray/gcs/grpc_services.cc), the same service the Python
 		// subscriber uses. InternalPubSubGcsService exists only in the proto
-		// and is never registered by this fork's server, so publishing
+		// and is never registered by the Ray GCS server, so publishing
 		// through it fails with Unimplemented.
 		pubsub: proto.NewObservabilityPubSubServiceClient(conn),
 	}, nil

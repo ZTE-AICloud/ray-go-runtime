@@ -313,3 +313,51 @@ func TestCheckLogFilesAndPublishUpdatesFlushesOnByteLimit(t *testing.T) {
 		t.Fatalf("second batch = %#v, want [40 z's]", got)
 	}
 }
+
+func TestCheckLogFilesAndPublishUpdatesSkipsPositionUpdateAfterFailedReopen(t *testing.T) {
+	logsDir := t.TempDir()
+	publisher := &recordingPublisher{}
+	logPath := createLogFile(t, logsDir, "raylet.err", "line1\nline2\n")
+
+	m, err := New("127.0.0.1", logsDir, publisher)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	m.numLinesToRead = 1
+	if err := m.updateLogFilenames(); err != nil {
+		t.Fatalf("updateLogFilenames() error = %v", err)
+	}
+	if err := m.openClosedFiles(); err != nil {
+		t.Fatalf("openClosedFiles() error = %v", err)
+	}
+
+	// One pass leaves line2 buffered in the reader, so the reader holds more
+	// bytes than the recorded position.
+	if _, err := m.checkLogFilesAndPublishUpdates(); err != nil {
+		t.Fatalf("checkLogFilesAndPublishUpdates() error = %v", err)
+	}
+	info := m.openFiles[0]
+	baseline := info.filePosition
+	if baseline <= 0 {
+		t.Fatalf("test setup broken: filePosition = %d, want a positive baseline", baseline)
+	}
+
+	// Simulate the narrow race in reopenIfNecessary: the file vanished between
+	// the stat and the open, so the old handle was closed and the new open
+	// failed, leaving fileHandle nil while the stale reader stays in place.
+	_ = info.fileHandle.Close()
+	info.fileHandle = nil
+	if err := os.Remove(logPath); err != nil {
+		t.Fatalf("remove log file: %v", err)
+	}
+
+	if _, err := m.checkLogFilesAndPublishUpdates(); err != nil {
+		t.Fatalf("checkLogFilesAndPublishUpdates() after failed reopen error = %v", err)
+	}
+	if info.filePosition != baseline {
+		t.Fatalf("filePosition = %d, want %d; a nil handle must not update the recorded position", info.filePosition, baseline)
+	}
+	if info.filePosition < 0 {
+		t.Fatalf("filePosition = %d, want a non-negative position", info.filePosition)
+	}
+}

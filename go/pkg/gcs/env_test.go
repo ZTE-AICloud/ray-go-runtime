@@ -107,7 +107,7 @@ func TestDialOptionsFromEnvTLSMissingCerts(t *testing.T) {
 	}
 }
 
-// TestK8sAuthModeValueIsNotAccepted pins this fork's two-state authentication
+// TestK8sAuthModeValueIsNotAccepted pins Ray's two-state authentication
 // model: RAY_AUTH_MODE is "token" or off, so "k8s" attaches nothing even when
 // a service-account token is available and the RAY_ENABLE_K8S_TOKEN_AUTH flag
 // is on.
@@ -253,10 +253,10 @@ func TestDialOptionsFromEnvTokenDefaultPath(t *testing.T) {
 	}
 }
 
-// TestDefaultAuthTokenPathFallsBackToTheUserDatabase pins the fork's home
-// resolution: with HOME unset, the default token path falls back to the user
-// database instead of resolving nothing. The test host has a passwd entry, so
-// user.Current() supplies the fallback home.
+// TestDefaultAuthTokenPathFallsBackToTheUserDatabase pins the C++
+// GetDefaultTokenPath alignment: with HOME unset, the default token path falls
+// back to the user database instead of resolving nothing. The test host has a
+// passwd entry, so user.Current() supplies the fallback home.
 func TestDefaultAuthTokenPathFallsBackToTheUserDatabase(t *testing.T) {
 	t.Setenv("HOME", "")
 	u, err := user.Current()

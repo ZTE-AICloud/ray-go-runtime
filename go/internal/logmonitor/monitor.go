@@ -423,8 +423,20 @@ func (m *Monitor) checkLogFilesAndPublishUpdates() (bool, error) {
 
 		// Record the exact consumed position: the OS offset minus bytes still
 		// buffered inside the reader. Reusing the reader makes this precise.
-		offset, _ := fileInfo.fileHandle.Seek(0, 1)
-		fileInfo.filePosition = offset - int64(reader.Buffered())
+		// A failed reopen leaves no handle when the file vanished between the
+		// stat and the open above; skip the update then so a later poll retries
+		// the open from the last recorded position instead of persisting a
+		// position derived from a nil handle.
+		if fileInfo.fileHandle != nil && reader != nil {
+			offset, _ := fileInfo.fileHandle.Seek(0, 1)
+			fileInfo.filePosition = offset - int64(reader.Buffered())
+			if fileInfo.filePosition < 0 {
+				// A transient Seek failure reports offset 0; clamp so a
+				// negative position can never reach openAtCurrentPosition's
+				// Seek and fail the whole monitor.
+				fileInfo.filePosition = 0
+			}
+		}
 		if err := flush(); err != nil {
 			return false, err
 		}

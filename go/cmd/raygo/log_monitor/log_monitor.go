@@ -177,9 +177,21 @@ func envPositiveDuration(key string, defaultVal time.Duration) time.Duration {
 	seconds, ok := envPositive(key, defaultVal, func(k string) float64 {
 		return common.EnvFloat(k, 0)
 	})
-	if ok {
-		return time.Duration(seconds * float64(time.Second))
+	if !ok {
+		return defaultVal
 	}
+	d := time.Duration(seconds * float64(time.Second))
+	if d > 0 {
+		return d
+	}
+	// The seconds value passed envPositive's checks but did not survive the
+	// conversion: large values overflow int64 into a negative duration and
+	// tiny values underflow to 0. Warn and fall back like the other knobs
+	// instead of leaving a caller-side > 0 gate to restore the default
+	// silently.
+	fmt.Fprintf(os.Stderr,
+		"log_monitor: ignoring invalid %s (want a positive number); using default %v\n",
+		key, defaultVal)
 	return defaultVal
 }
 

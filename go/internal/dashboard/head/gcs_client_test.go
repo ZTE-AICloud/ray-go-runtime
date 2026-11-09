@@ -505,8 +505,8 @@ func TestWithTokenExplicitOverridesEnv(t *testing.T) {
 	}
 }
 
-// TestGCSClientDialsThroughThePlainTCPDialer pins that the fork's plain-TCP
-// dialer reaches the built connection's dial path.
+// TestGCSClientDialsThroughThePlainTCPDialer pins that the plain-TCP dialer
+// reaches the built connection's dial path.
 func TestGCSClientDialsThroughThePlainTCPDialer(t *testing.T) {
 	var calls int32
 	prev := grpcDialer
