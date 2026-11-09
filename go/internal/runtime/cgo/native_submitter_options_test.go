@@ -106,6 +106,40 @@ func TestConvertActorCreationOptionsToC_LifetimeAsyncMaxPendingCalls(t *testing.
 	freeActorCreationOptions(result)
 }
 
+// TestConvertActorCreationOptionsToC_MaxConcurrencyDefaults verifies the
+// three-state max_concurrency conversion: an unset value (0) defaults to 1000
+// for an async actor (Python's DEFAULT_MAX_CONCURRENCY_ASYNC, so async methods
+// can interleave on the event loop) and to 1 (serialized) for a synchronous
+// actor, -1 stays unlimited, and an explicit positive value is never
+// overridden regardless of IsAsync.
+func TestConvertActorCreationOptionsToC_MaxConcurrencyDefaults(t *testing.T) {
+	tests := []struct {
+		name           string
+		isAsync        bool
+		maxConcurrency int
+		want           C.int
+	}{
+		{"AsyncUnsetDefaultsToAsyncDefault", true, 0, 1000},
+		{"SyncUnsetDefaultsToSerialized", false, 0, 1},
+		{"AsyncExplicitValueUnchanged", true, 4, 4},
+		{"SyncExplicitValueUnchanged", false, 4, 4},
+		{"AsyncUnlimitedUnchanged", true, -1, -1},
+		{"SyncUnlimitedUnchanged", false, -1, -1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := &submitter.ActorCreationOptions{
+				IsAsync:        tc.isAsync,
+				MaxConcurrency: tc.maxConcurrency,
+			}
+			result := convertActorCreationOptionsToC(opts, nil)
+			assert.NotNil(t, result)
+			assert.Equal(t, tc.want, result.max_concurrency)
+			freeActorCreationOptions(result)
+		})
+	}
+}
+
 // TestConvertActorCreationOptionsToC_ConcurrencyGroups verifies the
 // concurrency-group flat arrays are allocated with the expected layout and that
 // freeActorCreationOptions releases them without error. The module/package/

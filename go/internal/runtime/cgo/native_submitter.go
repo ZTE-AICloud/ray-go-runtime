@@ -456,15 +456,29 @@ func convertActorCreationOptionsToC(opts *submitter.ActorCreationOptions, actorD
 		cOpts.max_task_retries = C.int(opts.MaxTaskRetries)
 	}
 
-	// max_concurrency: 0 means "use the default" (1 = serialized), -1 means
-	// unlimited, and values >= 1 pass through directly. The builder default is
-	// already 1; 0 only occurs from a zero-value struct and must also resolve
-	// to the serialized default (not unlimited) to avoid silent data races.
+	// max_concurrency: 0 means "use the default", -1 means unlimited, and
+	// values >= 1 pass through directly. For a synchronous actor the default
+	// is 1 (serialized) to avoid silent data races; a 0 only occurs from a
+	// zero-value struct.
+	//
+	// For an async actor with an unset max_concurrency we mirror Python's
+	// actor.py default (DEFAULT_MAX_CONCURRENCY_ASYNC = 1000) instead of 1.
+	// An async actor with max_concurrency=1 serializes its async methods: the
+	// worker's fiber rate limiter admits only one task at a time, so a
+	// long-running async method (e.g. JobSupervisor.run) blocks any subsequent
+	// async method (e.g. JobSupervisor.stop) from ever being scheduled. Python
+	// defaults async actors to 1000 so such methods can interleave on the
+	// asyncio event loop.
 	switch {
 	case opts.MaxConcurrency > 0:
 		cOpts.max_concurrency = C.int(opts.MaxConcurrency)
 	case opts.MaxConcurrency < 0:
 		cOpts.max_concurrency = -1
+	case opts.IsAsync:
+		// defaultAsyncMaxConcurrency matches Python's
+		// ray_constants.DEFAULT_MAX_CONCURRENCY_ASYNC.
+		const defaultAsyncMaxConcurrency = 1000
+		cOpts.max_concurrency = defaultAsyncMaxConcurrency
 	default:
 		cOpts.max_concurrency = 1
 	}
