@@ -105,6 +105,49 @@ func TestJoinLines(t *testing.T) {
 	assert.Equal(t, "", joinLines(nil))
 }
 
+// TestGetSupervisorRuntimeEnvSerializationError verifies a runtime env that
+// cannot be serialized is reported to the caller instead of yielding an empty
+// env, which would run the job without its pip packages, env vars or working
+// dir.
+func TestGetSupervisorRuntimeEnvSerializationError(t *testing.T) {
+	jm := &JobManager{}
+	_, err := jm.getSupervisorRuntimeEnv(map[string]interface{}{
+		"env_vars": map[string]interface{}{"bad": make(chan int)},
+	}, "sub1", false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to serialize user runtime env")
+}
+
+// TestSubmitJobRuntimeEnvSerializationFailure routes the same failure through
+// submitJob: the job is recorded and immediately marked FAILED with the
+// supervisor-start error type, instead of running with a silently emptied
+// runtime env.
+func TestSubmitJobRuntimeEnvSerializationFailure(t *testing.T) {
+	ctx := t.Context()
+	jm, sink := newTestJobManager(t)
+	jm.recoverDone = make(chan struct{})
+	close(jm.recoverDone)
+
+	submissionID, err := jm.submitJob(ctx, &JobSubmitRequest{
+		Entrypoint:   "echo",
+		SubmissionID: ptrString("sub1"),
+		RuntimeEnv:   map[string]interface{}{"bad": make(chan int)},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "sub1", submissionID)
+
+	info, err := jm.jobInfoClient.GetInfo(ctx, "sub1")
+	require.NoError(t, err)
+	require.NotNil(t, info)
+	assert.Equal(t, JobStatusFailed, info.Status)
+	require.NotNil(t, info.ErrorType)
+	assert.Equal(t, string(JobErrorTypeJobSupervisorActorStartFailure), *info.ErrorType)
+	require.NotNil(t, info.Message)
+	assert.Contains(t, *info.Message, "failed to serialize runtime env")
+	assert.Nil(t, info.RuntimeEnvJSON, "an unserializable env must not be recorded as empty")
+	assert.Len(t, sink.started, 1)
+}
+
 func TestJobStartTimeoutSeconds(t *testing.T) {
 	t.Setenv(rayJobStartTimeoutSecondsEnvVar, "")
 	assert.Equal(t, float64(defaultJobStartTimeoutSeconds), jobStartTimeoutSeconds())

@@ -49,6 +49,7 @@ go_test(
         "//go/pkg/ids",
         "//go/pkg/runtime/object",
         "//go/proto",
+        "@com_github_coder_websocket//:websocket",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],

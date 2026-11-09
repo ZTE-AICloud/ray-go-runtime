@@ -319,17 +319,20 @@ func (m *JobManager) applySchedulingStrategy(submissionID string, resourcesSpeci
 // getSupervisorRuntimeEnv builds the runtime env of a supervisor actor: the
 // user runtime env plus the agent's niceness, device-visibility workarounds,
 // and (optionally) redirection of the runtime env setup logs to the driver log.
-func (m *JobManager) getSupervisorRuntimeEnv(userRuntimeEnv map[string]interface{}, submissionID string, resourcesSpecified bool) string {
+// Any failure is returned to the caller: silently dropping the user runtime env
+// would run the job without its pip packages, env vars or working dir.
+func (m *JobManager) getSupervisorRuntimeEnv(userRuntimeEnv map[string]interface{}, submissionID string, resourcesSpecified bool) (string, error) {
 	userEnvJSON := "{}"
 	if userRuntimeEnv != nil {
-		if b, err := jsonMarshal(userRuntimeEnv); err == nil {
-			userEnvJSON = string(b)
+		b, err := jsonMarshal(userRuntimeEnv)
+		if err != nil {
+			return "", fmt.Errorf("failed to serialize user runtime env: %w", err)
 		}
+		userEnvJSON = string(b)
 	}
 	env, err := api.NewRuntimeEnvFromJSON(userEnvJSON)
 	if err != nil {
-		log.Log.Error(err, "failed to build supervisor runtime env")
-		return ""
+		return "", fmt.Errorf("failed to build supervisor runtime env: %w", err)
 	}
 	envVars, _ := userRuntimeEnv["env_vars"].(map[string]interface{})
 	if envVars == nil {
@@ -341,8 +344,7 @@ func (m *JobManager) getSupervisorRuntimeEnv(userRuntimeEnv map[string]interface
 		envVars[noSetAscendRTVisibleDevicesEnvVar] = "1"
 	}
 	if err := env.Set("env_vars", envVars); err != nil {
-		log.Log.Error(err, "failed to set supervisor runtime env env_vars")
-		return ""
+		return "", fmt.Errorf("failed to set supervisor runtime env env_vars: %w", err)
 	}
 
 	if os.Getenv(rayStreamRuntimeEnvLogToJobDriverLogEnvVar) == "1" {
@@ -352,17 +354,15 @@ func (m *JobManager) getSupervisorRuntimeEnv(userRuntimeEnv map[string]interface
 		}
 		config["log_files"] = []string{m.logClient.getLogFilePath(submissionID)}
 		if err := env.Set("config", config); err != nil {
-			log.Log.Error(err, "failed to set supervisor runtime env config")
-			return ""
+			return "", fmt.Errorf("failed to set supervisor runtime env config: %w", err)
 		}
 	}
 
 	infoJSON, err := env.SerializeToRuntimeEnvInfo()
 	if err != nil {
-		log.Log.Error(err, "failed to serialize supervisor runtime env")
-		return ""
+		return "", fmt.Errorf("failed to serialize supervisor runtime env: %w", err)
 	}
-	return infoJSON
+	return infoJSON, nil
 }
 
 // submitJob records a pending job, creates its supervisor actor, and starts
@@ -409,9 +409,12 @@ func (m *JobManager) submitJob(ctx context.Context, req *JobSubmitRequest) (stri
 		EntrypointMemory:    ptrUint64(uint64(entrypointMemory)),
 		EntrypointResources: req.EntrypointResources,
 	}
+	var runtimeEnvJSONErr error
 	if req.RuntimeEnv != nil {
 		b, err := jsonMarshal(req.RuntimeEnv)
-		if err == nil {
+		if err != nil {
+			runtimeEnvJSONErr = err
+		} else {
 			s := string(b)
 			jobInfo.RuntimeEnvJSON = &s
 		}
@@ -434,6 +437,17 @@ func (m *JobManager) submitJob(ctx context.Context, req *JobSubmitRequest) (stri
 
 	m.eventLogger.submissionStarted(submissionID)
 
+	if runtimeEnvJSONErr != nil {
+		tb := fmt.Sprintf("failed to serialize runtime env for job %s: %v", submissionID, runtimeEnvJSONErr)
+		log.Log.Error(fmt.Errorf("%s", tb), "failed to serialize job runtime env")
+		msg := tb
+		et := JobErrorTypeJobSupervisorActorStartFailure
+		if _, perr := m.putStatus(ctx, submissionID, JobStatusFailed, &msg, nil, &et); perr != nil {
+			log.Log.Error(perr, "failed to update job status to FAILED")
+		}
+		return submissionID, nil
+	}
+
 	if err := m.ensureRuntime(); err != nil {
 		tb := fmt.Sprintf("failed to initialize Ray runtime for job %s: %v", submissionID, err)
 		log.Log.Error(fmt.Errorf("%s", tb), "failed to initialize Ray runtime")
@@ -445,13 +459,24 @@ func (m *JobManager) submitJob(ctx context.Context, req *JobSubmitRequest) (stri
 		return submissionID, nil
 	}
 
+	supervisorRuntimeEnvJSON, err := m.getSupervisorRuntimeEnv(req.RuntimeEnv, submissionID, resourcesSpecified)
+	if err != nil {
+		tb := fmt.Sprintf("failed to build runtime env for job %s: %v", submissionID, err)
+		log.Log.Error(fmt.Errorf("%s", tb), "failed to build supervisor runtime env")
+		msg := tb
+		et := JobErrorTypeJobSupervisorActorStartFailure
+		if _, perr := m.putStatus(ctx, submissionID, JobStatusFailed, &msg, nil, &et); perr != nil {
+			log.Log.Error(perr, "failed to update job status to FAILED")
+		}
+		return submissionID, nil
+	}
 	supervisorOpts := supervisorCreateOptions{
 		name:           jobActorName(submissionID),
 		numCPUs:        entrypointNumCPUs,
 		numGPUs:        entrypointNumGPUs,
 		memory:         entrypointMemory,
 		resources:      req.EntrypointResources,
-		runtimeEnvJSON: m.getSupervisorRuntimeEnv(req.RuntimeEnv, submissionID, resourcesSpecified),
+		runtimeEnvJSON: supervisorRuntimeEnvJSON,
 		nodeAffinity:   nodeAffinity,
 	}
 	constructorArgs := []interface{}{

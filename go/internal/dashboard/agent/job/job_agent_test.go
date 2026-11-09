@@ -15,11 +15,14 @@
 package job
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/coder/websocket"
 	"github.com/ray-project/ray/go/internal/dashboard/agent"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -146,6 +149,12 @@ func TestJobRoutesReachHandlers(t *testing.T) {
 		assert.Equal(t, "text/plain; charset=utf-8", rec.Header().Get("Content-Type"))
 	})
 
+	t.Run("submit with fractional entrypoint_memory is a 400", func(t *testing.T) {
+		rec := serveJobRequest(mux, http.MethodPost, "/api/job_agent/jobs/", `{"entrypoint":"echo","entrypoint_memory":1073741824.5}`)
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Equal(t, "entrypoint_memory must be an integer, got float", rec.Body.String())
+	})
+
 	for _, tc := range []struct{ method, target string }{
 		{http.MethodPost, "/api/job_agent/jobs/does-not-exist/stop"},
 		{http.MethodDelete, "/api/job_agent/jobs/does-not-exist"},
@@ -175,4 +184,59 @@ func TestJobRoutesAreMethodScoped(t *testing.T) {
 	rec = serveJobRequest(mux, http.MethodPost, "/api/job_agent/jobs/job-1", "")
 	require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
 	assert.Contains(t, rec.Header().Get("Allow"), http.MethodDelete)
+}
+
+// startTailJobServer serves the tail route behind a real HTTP server and
+// reports when the websocket handler returns, so a test can observe the handler
+// exiting.
+func startTailJobServer(t *testing.T, ja *JobAgent, submissionID string) (string, <-chan struct{}) {
+	t.Helper()
+	mux := http.NewServeMux()
+	done := make(chan struct{})
+	mux.HandleFunc("GET /api/job_agent/jobs/{job_or_submission_id}/logs/tail", func(w http.ResponseWriter, r *http.Request) {
+		ja.handleTailJobLogs(w, r)
+		close(done)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/job_agent/jobs/" + submissionID + "/logs/tail", done
+}
+
+// TestHandleTailJobLogsAnswersControlFrames pins the websocket drain: the
+// handler must read the connection so coder/websocket answers pings and
+// observes the peer's close instead of leaking the hijacked connection until
+// the first ping timeout.
+func TestHandleTailJobLogsAnswersControlFrames(t *testing.T) {
+	ja := newTestJobAgent(t)
+	_, err := ja.jobManager.jobInfoClient.PutInfo(t.Context(), "sub1", &JobInfo{Entrypoint: "echo", Status: JobStatusRunning}, false)
+	require.NoError(t, err)
+
+	t.Run("ping is answered while the tail is idle", func(t *testing.T) {
+		wsURL, _ := startTailJobServer(t, ja, "sub1")
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		conn, _, err := websocket.Dial(ctx, wsURL, nil)
+		require.NoError(t, err)
+		defer conn.CloseNow()
+		// CloseRead actively reads pongs; without the server-side drain the pong
+		// never arrives and Ping times out.
+		pingCtx, pingCancel := context.WithTimeout(conn.CloseRead(ctx), 3*time.Second)
+		defer pingCancel()
+		require.NoError(t, conn.Ping(pingCtx))
+	})
+
+	t.Run("peer close ends the handler", func(t *testing.T) {
+		wsURL, done := startTailJobServer(t, ja, "sub1")
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		conn, _, err := websocket.Dial(ctx, wsURL, nil)
+		require.NoError(t, err)
+		defer conn.CloseNow()
+		require.NoError(t, conn.Close(websocket.StatusNormalClosure, ""))
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Fatal("tail handler did not return after the peer closed the connection")
+		}
+	})
 }

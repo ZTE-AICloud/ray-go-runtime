@@ -192,12 +192,27 @@ func (a *JobAgent) handleTailJobLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	defer ws.Close(websocket.StatusNormalClosure, "")
 
-	lines, err := a.getJobManager().tailJobLogs(r.Context(), *job.SubmissionID)
+	// coder/websocket processes control frames (ping, pong and close) only while
+	// a read is in flight, so a write-only handler stops answering pings and
+	// leaks the hijacked connection when the peer goes away. Drain the
+	// connection concurrently with the write loop and stop the tail once the
+	// connection is closed.
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	go func() {
+		defer cancel()
+		for {
+			if _, _, err := ws.Read(ctx); err != nil {
+				return
+			}
+		}
+	}()
+
+	lines, err := a.getJobManager().tailJobLogs(ctx, *job.SubmissionID)
 	if err != nil {
 		log.Log.Error(err, "failed to tail job logs", "submission_id", *job.SubmissionID)
 		return
 	}
-	ctx := r.Context()
 	for line := range lines {
 		if err := ws.Write(ctx, websocket.MessageText, []byte(line)); err != nil {
 			return
