@@ -176,7 +176,7 @@ func TestApplySchedulingStrategyResourcesSpecified(t *testing.T) {
 	// the actor lands where its resources are available.
 	ctx := t.Context()
 	client := newFakeGCSClient()
-	_, err := client.Put(ctx, kvNamespaceJob, kvHeadNodeIDKey, []byte("head-node-id"), false)
+	_, err := client.Put(ctx, kvNamespaceJob, kvHeadNodeIDKey, []byte(testHeadNodeIDHex), false)
 	require.NoError(t, err)
 	jm := &JobManager{jobInfoClient: NewJobInfoStorageClient(client), ctx: ctx}
 
@@ -193,13 +193,13 @@ func TestApplySchedulingStrategyNoHeadNode(t *testing.T) {
 func TestApplySchedulingStrategyPinsToHeadNode(t *testing.T) {
 	ctx := t.Context()
 	client := newFakeGCSClient()
-	_, err := client.Put(ctx, kvNamespaceJob, kvHeadNodeIDKey, []byte("head-node-id"), false)
+	_, err := client.Put(ctx, kvNamespaceJob, kvHeadNodeIDKey, []byte(testHeadNodeIDHex), false)
 	require.NoError(t, err)
 	jm := &JobManager{jobInfoClient: NewJobInfoStorageClient(client), ctx: ctx}
 
 	opts := jm.applySchedulingStrategy("sub1", false)
 	require.NotNil(t, opts)
-	assert.Equal(t, "head-node-id", opts.NodeID)
+	assert.Equal(t, testHeadNodeIDHex, opts.NodeID)
 	assert.False(t, opts.Soft, "head-node pinning must be strict")
 }
 
@@ -207,7 +207,7 @@ func TestApplySchedulingStrategyAllowDriverOnWorkers(t *testing.T) {
 	t.Setenv(rayJobAllowDriverOnWorkerNodesEnvVar, "1")
 	ctx := t.Context()
 	client := newFakeGCSClient()
-	_, err := client.Put(ctx, kvNamespaceJob, kvHeadNodeIDKey, []byte("head-node-id"), false)
+	_, err := client.Put(ctx, kvNamespaceJob, kvHeadNodeIDKey, []byte(testHeadNodeIDHex), false)
 	require.NoError(t, err)
 	jm := &JobManager{jobInfoClient: NewJobInfoStorageClient(client), ctx: ctx}
 

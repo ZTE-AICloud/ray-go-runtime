@@ -28,6 +28,8 @@ import (
 
 	"github.com/ray-project/ray/go/internal/dashboard/jobutil"
 	"github.com/ray-project/ray/go/pkg/gcs"
+	"github.com/ray-project/ray/go/pkg/ids"
+	"github.com/ray-project/ray/go/pkg/log"
 )
 
 // KV layout aligned with python/ray/dashboard/modules/job/common.py.
@@ -345,6 +347,13 @@ func (c *JobInfoStorageClient) GetAllJobs(ctx context.Context) (map[string]*JobI
 
 // GetHeadNodeID returns the id of the head node as published in the internal
 // KV, or an empty string when the key is absent.
+//
+// The value is validated as a node id hex string before it is returned: it is
+// the only input the agent feeds to a strict native decoder, and the C++ side
+// reacts to a malformed id by throwing out of an extern "C" boundary or
+// aborting on a length check, which kills the agent. A value that does not
+// decode is treated like an absent key, so the caller falls back to default
+// scheduling instead.
 func (c *JobInfoStorageClient) GetHeadNodeID(ctx context.Context) (string, error) {
 	value, err := c.client.Get(ctx, kvNamespaceJob, kvHeadNodeIDKey)
 	if err == gcs.ErrKeyNotFound {
@@ -353,5 +362,14 @@ func (c *JobInfoStorageClient) GetHeadNodeID(ctx context.Context) (string, error
 	if err != nil {
 		return "", err
 	}
-	return string(value), nil
+	headNodeID := strings.TrimSpace(string(value))
+	if headNodeID == "" {
+		return "", nil
+	}
+	if _, err := ids.NodeIDFromHex(headNodeID); err != nil {
+		log.Log.Error(err, "ignoring a malformed head node id in the internal KV; using default scheduling for the job driver",
+			"value", headNodeID)
+		return "", nil
+	}
+	return headNodeID, nil
 }

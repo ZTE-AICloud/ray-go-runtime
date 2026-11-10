@@ -18,6 +18,7 @@ go_library(
         "//go/internal/dashboard/jobutil",
         "//go/internal/event",
         "//go/pkg/gcs",
+        "//go/pkg/ids",
         "//go/pkg/log",
         "//go/pkg/options",
         "//go/pkg/runtime/api",

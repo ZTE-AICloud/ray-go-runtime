@@ -22,6 +22,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// testHeadNodeIDHex is a syntactically valid node id: 28 bytes, hex encoded,
+// which is what the native node-affinity decoder requires.
+const testHeadNodeIDHex = "0123456789abcdef0123456789abcdef0123456789abcdef01234567"
+
 func TestJobActorName(t *testing.T) {
 	assert.Equal(t, "_ray_internal_job_actor_abc123", jobActorName("abc123"))
 }
@@ -183,11 +187,41 @@ func TestJobInfoStorageClientGetHeadNodeID(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "", id)
 
-	_, err = c.client.Put(ctx, kvNamespaceJob, kvHeadNodeIDKey, []byte("node-1"), true)
+	_, err = c.client.Put(ctx, kvNamespaceJob, kvHeadNodeIDKey, []byte(testHeadNodeIDHex), true)
 	require.NoError(t, err)
 	id, err = c.GetHeadNodeID(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, "node-1", id)
+	assert.Equal(t, testHeadNodeIDHex, id)
+
+	// Surrounding whitespace is trimmed rather than passed to the native
+	// decoder, which would reject the id.
+	_, err = c.client.Put(ctx, kvNamespaceJob, kvHeadNodeIDKey, []byte(" "+testHeadNodeIDHex+"\n"), true)
+	require.NoError(t, err)
+	id, err = c.GetHeadNodeID(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, testHeadNodeIDHex, id)
+}
+
+// TestJobInfoStorageClientGetHeadNodeIDRejectsMalformed proves a value that
+// cannot be a node id is treated as absent: the id feeds a native decoder that
+// throws or aborts on malformed input, and an abort would take the whole agent
+// process down. Every malformed shape therefore has to stop here.
+func TestJobInfoStorageClientGetHeadNodeIDRejectsMalformed(t *testing.T) {
+	for _, value := range []string{
+		"node-1", // not hex
+		testHeadNodeIDHex[:len(testHeadNodeIDHex)-1], // odd length
+		testHeadNodeIDHex[:len(testHeadNodeIDHex)-2], // one byte short
+		testHeadNodeIDHex + "00",                     // one byte long
+		testHeadNodeIDHex[:54] + "zz",                // non-hex characters
+	} {
+		ctx := context.Background()
+		c := NewJobInfoStorageClient(newFakeGCSClient())
+		_, err := c.client.Put(ctx, kvNamespaceJob, kvHeadNodeIDKey, []byte(value), true)
+		require.NoError(t, err)
+		id, err := c.GetHeadNodeID(ctx)
+		require.NoError(t, err, "value %q", value)
+		assert.Equal(t, "", id, "value %q must be rejected, not passed to the native decoder", value)
+	}
 }
 
 func TestJobInfoStorageClientGetInfoUnmarshalError(t *testing.T) {
