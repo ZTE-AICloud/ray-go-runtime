@@ -230,13 +230,16 @@ func TestDataSourceSubscriptionRefresh(t *testing.T) {
 		t.Fatalf("Start() = %v, want nil", err)
 	}
 
-	// A node update is polled and upserted into the cache.
+	// A node update is polled and upserted into the cache. The address the
+	// agent registers its ip key under travels in NodeManagerAddress; the
+	// DEAD update that follows drops the contact fields, and the cleanup
+	// falls back to this cached address.
 	nodeID := []byte{0x10}
 	mock.enqueue(proto.ChannelType_GCS_NODE_INFO_CHANNEL, &proto.PubMessage{
 		KeyId:      nodeID,
 		SequenceId: 1,
 		InnerMessage: &proto.PubMessage_NodeInfoMessage{
-			NodeInfoMessage: &proto.GcsNodeInfo{NodeId: nodeID, NodeManagerHostname: "node-b", State: proto.GcsNodeInfo_ALIVE},
+			NodeInfoMessage: &proto.GcsNodeInfo{NodeId: nodeID, NodeManagerHostname: "node-b", NodeManagerAddress: "10.0.0.10", State: proto.GcsNodeInfo_ALIVE},
 		},
 	})
 

@@ -395,13 +395,13 @@ func (d *DataSource) persistHeadNodeID(ctx context.Context, n *proto.GcsNodeInfo
 // (which removes both keys on a DEAD update). Both keys are attempted even if
 // the first delete fails, because the entries are keyed by node id and by node
 // manager address, and either one left behind points consumers at a dead agent.
-// removeAgentAddr drops a dead node's dashboard agent address entries. The
-// node update is the published DEAD event, whose contact fields are empty
+// The node update is the published DEAD event, whose contact fields are empty
 // (the same GCS pattern as the actor-table updates); prev is the node's own
 // cached ALIVE entry, which carries the address the ip key was registered
-// under. The snapshot path has no cached entry and passes nil, so a dead
-// node only ever seen dead leaves its ip key — the subscription path is the
-// one that covers it.
+// under. When no address is available the ip key cannot match anything, so it
+// is skipped rather than issued as a bare-prefix no-op. The snapshot path has
+// no cached entry and passes nil, so a dead node only ever seen dead leaves
+// its ip key — the subscription path is the one that covers it.
 func (d *DataSource) removeAgentAddr(ctx context.Context, n, prev *proto.GcsNodeInfo) {
 	if d.client == nil || n.GetState() != proto.GcsNodeInfo_DEAD {
 		return
@@ -413,7 +413,9 @@ func (d *DataSource) removeAgentAddr(ctx context.Context, n, prev *proto.GcsNode
 	}
 	keys := []string{
 		dashboardAgentAddrNodeIDPrefix + nodeIDHex,
-		dashboardAgentAddrIPPrefix + nodeIP,
+	}
+	if nodeIP != "" {
+		keys = append(keys, dashboardAgentAddrIPPrefix+nodeIP)
 	}
 	for _, key := range keys {
 		deleted, err := d.client.InternalKVDel(ctx, kvNamespaceDashboard, key, false)
