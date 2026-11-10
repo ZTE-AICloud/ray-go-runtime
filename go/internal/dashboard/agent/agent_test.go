@@ -342,6 +342,39 @@ func TestRunPersistsDashboardAgentPorts(t *testing.T) {
 	}
 }
 
+// TestRunMinimalPublishesSentinelsAndSkipsRegistration pins the two opposite
+// halves of the Python agent's minimal mode. The port files raylet waits on
+// must still appear, each holding the not-in-use sentinel, because a node
+// whose configured port is 0 blocks on them; the GCS agent-address keys must
+// not appear at all, because no server exists behind them and a reader that
+// finds the key would dial the sentinel port.
+func TestRunMinimalPublishesSentinelsAndSkipsRegistration(t *testing.T) {
+	dir := t.TempDir()
+	nodeID := ids.NewNodeID()
+	fake := &fakeKVClient{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := Run(ctx, Config{
+		NodeIP:     "127.0.0.1",
+		NodeID:     nodeID,
+		SessionDir: dir,
+		GCS:        fake,
+		Minimal:    true,
+	}, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	for _, name := range []string{"metrics_agent_port", "metrics_export_port", "dashboard_agent_listen_port"} {
+		if got := readPersistedPort(t, dir, nodeID, name); got != -1 {
+			t.Errorf("%s = %d, want -1", name, got)
+		}
+	}
+
+	if got := fake.kv[KVNamespaceDashboard]; len(got) != 0 {
+		t.Errorf("minimal mode published agent addresses %v, want none", got)
+	}
+}
+
 // TestPersistAgentPorts verifies the exact file names and decimal contents for
 // the two server ports. The metrics export port is written separately, once the
 // module that serves it has bound.

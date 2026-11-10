@@ -196,8 +196,15 @@ func Run(ctx context.Context, cfg Config, mods []Module) error {
 
 // runMinimal runs the agent without binding either server, mirroring the
 // Python agent's --minimal mode: _init_non_minimal is skipped, so no HTTP or
-// gRPC service exists, and the agent registers the not-in-use sentinel ports
-// (-1) before blocking until shutdown (agent.py:94-95, 206-238).
+// gRPC service exists (agent.py:94-105, 236-262).
+//
+// The two publication paths are deliberately opposite in minimal mode. The
+// port files raylet waits on are still written, each holding the not-in-use
+// sentinel: with a configured port of 0 raylet blocks until the file appears,
+// so omitting them would stall every node's registration for the full wait.
+// The GCS agent-address keys are not written at all, because there is no
+// server behind them — a reader that finds the key takes the agent as
+// reachable, and would dial the sentinel port.
 func runMinimal(ctx context.Context, cfg Config, mods []Module) error {
 	for _, m := range mods {
 		if err := m.Start(ctx); err != nil {
@@ -205,8 +212,11 @@ func runMinimal(ctx context.Context, cfg Config, mods []Module) error {
 		}
 	}
 
-	if err := registerAgentToGCS(ctx, cfg, -1, -1); err != nil {
-		return fmt.Errorf("register agent to GCS: %w", err)
+	if err := persistAgentPorts(cfg, -1, -1); err != nil {
+		return fmt.Errorf("persist dashboard agent ports: %w", err)
+	}
+	if err := persistMetricsExportPort(cfg, -1); err != nil {
+		return fmt.Errorf("persist dashboard agent metrics export port: %w", err)
 	}
 
 	<-ctx.Done()
