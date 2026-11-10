@@ -452,7 +452,28 @@ func validateJobSubmitRequest(raw map[string]interface{}) error {
 			}
 		}
 	}
+	if selector, ok := raw["entrypoint_label_selector"]; ok && !emptyLabelSelector(selector) {
+		// The Python agent honors this field by folding it into the supervisor
+		// actor's label selector. This agent pins the supervisor with a node
+		// affinity strategy instead, and the actor submission interface it uses
+		// has no label selector at all, so accepting the field would silently
+		// drop it: the job would be hard-pinned to the head node while the
+		// caller believed its selector was in effect. Reject it instead.
+		return &valueError{msg: "entrypoint_label_selector is not supported by the Go job agent: the job supervisor is pinned to the head node with a node affinity strategy, which cannot carry a label selector"}
+	}
 	return nil
+}
+
+// emptyLabelSelector reports whether a decoded entrypoint_label_selector value
+// is one the Python agent would treat as absent: null, or an empty dict. An
+// empty dict is falsy in Python, so a request carrying one is accepted there
+// and must not be rejected here.
+func emptyLabelSelector(v interface{}) bool {
+	if v == nil {
+		return true
+	}
+	dict, isDict := v.(map[string]interface{})
+	return isDict && len(dict) == 0
 }
 
 // jsonTypeName returns the Python type name of a decoded JSON value, so the

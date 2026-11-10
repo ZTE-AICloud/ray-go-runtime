@@ -175,6 +175,24 @@ func TestValidateJobSubmitRequest(t *testing.T) {
 	require.Error(t, err)
 	assert.EqualError(t, err, "entrypoint_memory must be an integer, got float")
 	assert.NoError(t, validateJobSubmitRequest(map[string]interface{}{"entrypoint_memory": 1073741824.0}))
+
+	// entrypoint_label_selector cannot be honored by this agent: accepting it
+	// would hard-pin the job to the head node while the caller believed its
+	// selector was applied. It is rejected instead of silently dropped.
+	err = validateJobSubmitRequest(map[string]interface{}{
+		"entrypoint_label_selector": map[string]interface{}{"pool": "gpu"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "entrypoint_label_selector is not supported")
+	var ve *valueError
+	require.ErrorAs(t, err, &ve, "the route layer maps this to 400 only for a valueError")
+
+	// The shapes the Python agent treats as absent stay accepted: null and an
+	// empty dict are both falsy there, so rejecting them would be a regression.
+	assert.NoError(t, validateJobSubmitRequest(map[string]interface{}{"entrypoint_label_selector": nil}))
+	assert.NoError(t, validateJobSubmitRequest(map[string]interface{}{
+		"entrypoint_label_selector": map[string]interface{}{},
+	}))
 }
 
 func TestJSONTypeName(t *testing.T) {
