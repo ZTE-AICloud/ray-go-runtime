@@ -28,11 +28,11 @@ import (
 	"github.com/ray-project/ray/go/internal/dashboard/head"
 	"github.com/ray-project/ray/go/pkg/log"
 	"github.com/ray-project/ray/go/proto"
-	goproto "google.golang.org/protobuf/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+	goproto "google.golang.org/protobuf/proto"
 )
 
 // kvNamespaceJob is KV_NAMESPACE_JOB; kvHeadNodeIDKey is KV_HEAD_NODE_ID_KEY.
@@ -133,11 +133,13 @@ func (d *DataSource) Start(ctx context.Context) error {
 					if !ok {
 						return
 					}
+					nodeIDHex := hex.EncodeToString(n.NodeId)
 					d.mu.Lock()
-					d.nodes[hex.EncodeToString(n.NodeId)] = n
+					prev := d.nodes[nodeIDHex]
+					d.nodes[nodeIDHex] = n
 					d.mu.Unlock()
 					d.persistHeadNodeID(ctx, n)
-					d.removeAgentAddr(ctx, n)
+					d.removeAgentAddr(ctx, n, prev)
 				case err := <-errCh:
 					if status.Code(err) == codes.Unimplemented {
 						// GCS servers built without the pubsub service report
@@ -393,14 +395,25 @@ func (d *DataSource) persistHeadNodeID(ctx context.Context, n *proto.GcsNodeInfo
 // (which removes both keys on a DEAD update). Both keys are attempted even if
 // the first delete fails, because the entries are keyed by node id and by node
 // manager address, and either one left behind points consumers at a dead agent.
-func (d *DataSource) removeAgentAddr(ctx context.Context, n *proto.GcsNodeInfo) {
+// removeAgentAddr drops a dead node's dashboard agent address entries. The
+// node update is the published DEAD event, whose contact fields are empty
+// (the same GCS pattern as the actor-table updates); prev is the node's own
+// cached ALIVE entry, which carries the address the ip key was registered
+// under. The snapshot path has no cached entry and passes nil, so a dead
+// node only ever seen dead leaves its ip key — the subscription path is the
+// one that covers it.
+func (d *DataSource) removeAgentAddr(ctx context.Context, n, prev *proto.GcsNodeInfo) {
 	if d.client == nil || n.GetState() != proto.GcsNodeInfo_DEAD {
 		return
 	}
 	nodeIDHex := hex.EncodeToString(n.NodeId)
+	nodeIP := n.GetNodeManagerAddress()
+	if nodeIP == "" && prev != nil {
+		nodeIP = prev.GetNodeManagerAddress()
+	}
 	keys := []string{
 		dashboardAgentAddrNodeIDPrefix + nodeIDHex,
-		dashboardAgentAddrIPPrefix + n.GetNodeManagerAddress(),
+		dashboardAgentAddrIPPrefix + nodeIP,
 	}
 	for _, key := range keys {
 		deleted, err := d.client.InternalKVDel(ctx, kvNamespaceDashboard, key, false)
@@ -472,7 +485,7 @@ func (d *DataSource) initFromGCS(ctx context.Context) error {
 		// is already ALIVE when the subscription starts (no update event follows).
 		for _, n := range nodeReply.NodeInfoList {
 			d.persistHeadNodeID(ctx, n)
-			d.removeAgentAddr(ctx, n)
+			d.removeAgentAddr(ctx, n, nil)
 		}
 	}
 	actorReply, err := d.client.GetAllActorInfo(ctx, &proto.GetAllActorInfoRequest{})

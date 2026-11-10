@@ -1238,7 +1238,35 @@ func TestRemoveAgentAddrDeadNode(t *testing.T) {
 		NodeId:             []byte{0xab, 0xcd},
 		NodeManagerAddress: "1.2.3.4",
 		State:              proto.GcsNodeInfo_DEAD,
-	})
+	}, nil)
+
+	want := []string{
+		"dashboard/DASHBOARD_AGENT_ADDR_NODE_ID_PREFIX:abcd",
+		"dashboard/DASHBOARD_AGENT_ADDR_IP_PREFIX:1.2.3.4",
+	}
+	if got := mock.delCalls(); !slices.Equal(got, want) {
+		t.Fatalf("InternalKVDel calls = %v, want %v", got, want)
+	}
+}
+
+// A DEAD node update carries empty contact fields (the same GCS pattern as
+// the actor-table updates), so the ip key must be built from the address the
+// node last advertised while ALIVE.
+func TestRemoveAgentAddrUsesPreviousAddress(t *testing.T) {
+	mock := &mockGCSServer{}
+	client, stop := startMock(t, mock)
+	defer stop()
+
+	ds := NewDataSource(client, nil, nil, nil)
+	prev := &proto.GcsNodeInfo{
+		NodeId:             []byte{0xab, 0xcd},
+		NodeManagerAddress: "1.2.3.4",
+		State:              proto.GcsNodeInfo_ALIVE,
+	}
+	ds.removeAgentAddr(context.Background(), &proto.GcsNodeInfo{
+		NodeId: []byte{0xab, 0xcd},
+		State:  proto.GcsNodeInfo_DEAD,
+	}, prev)
 
 	want := []string{
 		"dashboard/DASHBOARD_AGENT_ADDR_NODE_ID_PREFIX:abcd",
@@ -1259,7 +1287,7 @@ func TestRemoveAgentAddrNonDeadNode(t *testing.T) {
 		NodeId:             []byte{0xab, 0xcd},
 		NodeManagerAddress: "1.2.3.4",
 		State:              proto.GcsNodeInfo_ALIVE,
-	})
+	}, nil)
 
 	if got := mock.delCalls(); len(got) != 0 {
 		t.Fatalf("InternalKVDel calls = %v, want none for a non-DEAD node", got)
@@ -1272,7 +1300,7 @@ func TestRemoveAgentAddrNilClient(t *testing.T) {
 	ds.removeAgentAddr(context.Background(), &proto.GcsNodeInfo{
 		NodeId: []byte{0xab, 0xcd},
 		State:  proto.GcsNodeInfo_DEAD,
-	})
+	}, nil)
 }
 
 func TestRemoveAgentAddrContinuesAfterFailure(t *testing.T) {
@@ -1287,7 +1315,7 @@ func TestRemoveAgentAddrContinuesAfterFailure(t *testing.T) {
 		NodeId:             []byte{0xab, 0xcd},
 		NodeManagerAddress: "1.2.3.4",
 		State:              proto.GcsNodeInfo_DEAD,
-	})
+	}, nil)
 
 	want := []string{
 		"dashboard/DASHBOARD_AGENT_ADDR_NODE_ID_PREFIX:abcd",
