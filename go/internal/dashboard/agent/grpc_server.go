@@ -20,6 +20,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/ray-project/ray/go/internal/dashboard/auth"
 	"github.com/ray-project/ray/go/pkg/log"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -59,11 +60,16 @@ func unaryRecoveryInterceptor(ctx context.Context, req interface{}, info *grpc.U
 
 // newGRPCServer builds the gRPC server, registers services from every module,
 // and binds the configured listen address.
+//
+// The recovery interceptor is chained outermost so a panic anywhere after it —
+// including inside the authentication interceptor — still becomes an Internal
+// status instead of taking the agent process down.
 func newGRPCServer(cfg Config, mods []Module) (*grpcServer, error) {
 	s := grpc.NewServer(
 		grpc.MaxRecvMsgSize(grpcMaxMessageSize),
 		grpc.MaxSendMsgSize(grpcMaxMessageSize),
-		grpc.ChainUnaryInterceptor(unaryRecoveryInterceptor),
+		grpc.ChainUnaryInterceptor(unaryRecoveryInterceptor, auth.GRPCUnaryServerInterceptor),
+		grpc.ChainStreamInterceptor(auth.GRPCStreamServerInterceptor),
 	)
 	for _, m := range mods {
 		if err := m.RegisterGRPC(s); err != nil {

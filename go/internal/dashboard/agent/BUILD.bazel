@@ -29,6 +29,7 @@ go_test(
     srcs = [
         "agent_test.go",
         "export_test.go",
+        "grpc_auth_test.go",
         "job_routes_test.go",
         "log_routes_test.go",
     ],
