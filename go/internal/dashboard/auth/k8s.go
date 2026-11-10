@@ -26,6 +26,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ray-project/ray/go/pkg/log"
 )
 
 // K8s authentication constants aligned with
@@ -33,8 +35,6 @@ import (
 const (
 	k8sServiceHostEnvVar      = "KUBERNETES_SERVICE_HOST"
 	k8sServicePortEnvVar      = "KUBERNETES_SERVICE_PORT"
-	k8sCaCertPath             = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-	k8sSaTokenPath            = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 	rayClusterNameEnvVar      = "RAY_CLUSTER_NAME"
 	rayClusterNamespaceEnvVar = "RAY_CLUSTER_NAMESPACE"
 
@@ -49,6 +49,14 @@ const (
 	k8sRayUserVerb       = "ray-user"
 )
 
+// Paths of the projected service account files. They are variables rather than
+// constants so a test can point the validator at a temporary directory and
+// observe how often the token file is re-read.
+var (
+	k8sCaCertPath  = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+	k8sSaTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+)
+
 // k8sTokenCacheTTL is how long a validated k8s token stays cached, aligned
 // with the C++ AuthenticationTokenValidator kCacheTTL(5).
 const k8sTokenCacheTTL = 5 * time.Minute
@@ -61,7 +69,6 @@ type k8sTokenValidatorImpl struct {
 	mu     sync.Mutex
 	cache  map[string]k8sCacheEntry
 	client *http.Client
-	sa     string
 }
 
 type k8sCacheEntry struct {
@@ -98,6 +105,9 @@ func (v *k8sTokenValidatorImpl) validate(token string) bool {
 
 // init builds the TLS client from the service account env and CA, or returns
 // false when any required input is missing (aligned with InitK8sClientConfig).
+// The service account token is only checked for presence here, as the C++
+// InitK8sClientConfig does: the value that authenticates each API call is read
+// per call, not cached, because kubelet rotates the projected token.
 func (v *k8sTokenValidatorImpl) init() bool {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -109,8 +119,7 @@ func (v *k8sTokenValidatorImpl) init() bool {
 	if host == "" || port == "" {
 		return false
 	}
-	sa, err := os.ReadFile(k8sSaTokenPath)
-	if err != nil || len(sa) == 0 {
+	if _, ok := readServiceAccountToken(); !ok {
 		return false
 	}
 	caData, err := os.ReadFile(k8sCaCertPath)
@@ -121,7 +130,6 @@ func (v *k8sTokenValidatorImpl) init() bool {
 	if !pool.AppendCertsFromPEM(caData) {
 		return false
 	}
-	v.sa = strings.TrimSpace(string(sa))
 	v.client = &http.Client{
 		Timeout: 10 * time.Second,
 		Transport: &http.Transport{
@@ -135,16 +143,41 @@ func (v *k8sTokenValidatorImpl) init() bool {
 	return true
 }
 
+// readServiceAccountToken returns the projected service account token used to
+// authenticate the validator's own calls to the Kubernetes API, and whether it
+// could be read. It is called per API call rather than cached: kubelet rotates
+// the projected token roughly every hour, and a cached copy would keep
+// presenting an expired credential until the process restarts — every
+// TokenReview would then answer 401 and every request would be rejected. The
+// C++ implementation reads the file in each of its API helpers for the same
+// reason (k8s_util.cc K8sApiPost/K8sApiGet/K8sApiPut).
+func readServiceAccountToken() (string, bool) {
+	sa, err := os.ReadFile(k8sSaTokenPath)
+	if err != nil {
+		return "", false
+	}
+	token := strings.TrimSpace(string(sa))
+	if token == "" {
+		return "", false
+	}
+	return token, true
+}
+
 // tokenReviewAndAuthorize runs the TokenReview then the SubjectAccessReview
 // against the Kubernetes API, mirroring k8s_util.cc ValidateToken.
 func (v *k8sTokenValidatorImpl) tokenReviewAndAuthorize(token string) bool {
 	v.mu.Lock()
 	client := v.client
-	sa := v.sa
-	host := os.Getenv(k8sServiceHostEnvVar)
-	port := os.Getenv(k8sServicePortEnvVar)
 	v.mu.Unlock()
 	if client == nil {
+		return false
+	}
+	host := os.Getenv(k8sServiceHostEnvVar)
+	port := os.Getenv(k8sServicePortEnvVar)
+	sa, ok := readServiceAccountToken()
+	if !ok {
+		log.Log.Error(fmt.Errorf("service account token unreadable at %s", k8sSaTokenPath),
+			"Kubernetes token validation failed")
 		return false
 	}
 
