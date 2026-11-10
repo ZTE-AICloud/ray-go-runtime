@@ -30,6 +30,7 @@ go_test(
         "agent_test.go",
         "export_test.go",
         "grpc_auth_test.go",
+        "grpc_bind_addr_test.go",
         "job_routes_test.go",
         "log_routes_test.go",
     ],

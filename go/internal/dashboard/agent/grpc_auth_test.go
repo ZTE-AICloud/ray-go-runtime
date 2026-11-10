@@ -16,6 +16,7 @@ package agent_test
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"testing"
 
@@ -130,3 +131,38 @@ func TestAgentGRPCRequiresTokenForUnaryRPC(t *testing.T) {
 // pre-cancelled context never reaches the server, so such a test would pass
 // whether or not the interceptor is installed. The disabled path is covered by
 // the unit cases in Task 1.
+
+// TestAgentGRPCBindsLoopbackForLocalhostNode mirrors agent.py, which binds the
+// resolved localhost address on a localhost node and every interface otherwise.
+// Binding all interfaces on a localhost node exposes the metrics and log gRPC
+// services to the whole network.
+func TestAgentGRPCBindsLoopbackForLocalhostNode(t *testing.T) {
+	for _, tc := range []struct {
+		nodeIP       string
+		wantLoopback bool
+	}{
+		{nodeIP: "127.0.0.1", wantLoopback: true},
+		{nodeIP: "localhost", wantLoopback: true},
+		{nodeIP: "192.0.2.10", wantLoopback: false},
+	} {
+		t.Run(tc.nodeIP, func(t *testing.T) {
+			addr, stop, err := agent.ServeGRPCServerForTest(agent.Config{NodeIP: tc.nodeIP}, nil)
+			if err != nil {
+				t.Fatalf("ServeGRPCServerForTest: %v", err)
+			}
+			defer stop()
+
+			host, _, err := net.SplitHostPort(addr)
+			if err != nil {
+				t.Fatalf("split %q: %v", addr, err)
+			}
+			ip := net.ParseIP(host)
+			if ip == nil {
+				t.Fatalf("host %q is not an IP", host)
+			}
+			if got := ip.IsLoopback(); got != tc.wantLoopback {
+				t.Fatalf("bound on %q (loopback=%v), want loopback=%v", host, got, tc.wantLoopback)
+			}
+		})
+	}
+}
