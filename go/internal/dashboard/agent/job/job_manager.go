@@ -687,9 +687,12 @@ func jobStartTimeoutSeconds() float64 {
 	return defaultJobStartTimeoutSeconds
 }
 
-// stopJob stops the supervisor of a job. The status write happens inside the
-// Python supervisor, so the mutex is held across the RPC: an in-flight monitor
-// write then observes the terminal status instead of resurrecting the job.
+// stopJob stops the supervisor of a job by submitting the supervisor's stop
+// method. The submission returns as soon as the task is enqueued, so the
+// mutex covers the enqueue only: the STOPPED status is written later by the
+// Python supervisor itself, outside this lock, and the monitor's re-read of
+// the status is what keeps a failure classification from overwriting it. The
+// Python agent takes no lock at all here.
 func (m *JobManager) stopJob(ctx context.Context, jobID string) (bool, error) {
 	if err := m.ensureRuntime(); err != nil {
 		return false, err
