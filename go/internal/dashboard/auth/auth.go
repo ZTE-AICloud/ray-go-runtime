@@ -24,7 +24,6 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/ray-project/ray/go/pkg/gcs"
 	"github.com/ray-project/ray/go/pkg/log"
@@ -167,47 +166,34 @@ func ValidateRequestToken(header string) bool {
 	if os.Getenv("RAY_AUTH_MODE") == "k8s" {
 		return k8sTokenValidator.validate(token)
 	}
-	expected := tokenLoader.expectedToken()
+	expected := expectedToken()
 	if expected == "" {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(token), []byte(expected)) == 1
 }
 
-// authTokenLoader caches the expected token in token mode so the file at
-// RAY_AUTH_TOKEN_PATH is only re-read when it changes. It mirrors the C++
-// AuthenticationTokenLoader precedence: RAY_AUTH_TOKEN env first, then the
-// RAY_AUTH_TOKEN_PATH file.
-type authTokenLoader struct {
-	mu        sync.Mutex
-	cached    string
-	tokenPath string
-}
-
-var tokenLoader = &authTokenLoader{}
-
 // expectedToken returns the expected bearer token for token mode. Precedence
 // 1 is the RAY_AUTH_TOKEN env var; precedence 2 is the RAY_AUTH_TOKEN_PATH
-// file (first non-empty line, trimmed). The file is re-read on every call so a
-// rotated token takes effect without a restart.
-func (l *authTokenLoader) expectedToken() string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if env := os.Getenv("RAY_AUTH_TOKEN"); env != "" {
-		return env
+// file (first non-empty line, trimmed). This mirrors the C++
+// AuthenticationTokenLoader.
+//
+// The env value is trimmed here as well as in RequestToken, because the C++
+// loader trims it: an environment value carrying a trailing newline must
+// compare equal to the one RequestToken sends, or every request the head or
+// agent makes to itself under token mode would be rejected.
+//
+// The file is re-read on every call so a rotated token takes effect without a
+// restart; there is nothing to cache, because the file itself is the state.
+func expectedToken() string {
+	if raw, set := os.LookupEnv(envAuthToken); set && raw != "" {
+		return strings.TrimSpace(raw)
 	}
-	path := os.Getenv("RAY_AUTH_TOKEN_PATH")
+	path := os.Getenv(envAuthTokenPath)
 	if path == "" {
 		return ""
 	}
-	if path != l.tokenPath {
-		l.cached = readTokenFileOrEmpty(path)
-		l.tokenPath = path
-		return l.cached
-	}
-	// Re-read the same path so a rotated token file is picked up.
-	l.cached = readTokenFileOrEmpty(path)
-	return l.cached
+	return readTokenFileOrEmpty(path)
 }
 
 // readTokenFileOrEmpty returns the first NON-empty trimmed line of path, or ""

@@ -164,6 +164,63 @@ func TestRequestTokenPrecedence(t *testing.T) {
 	}
 }
 
+// TestExpectedTokenTrimsEnv pins the inbound half of the trim. The expected
+// value is compared against the bearer a client sends, and RequestToken trims
+// the same environment value before attaching it; without the trim here a
+// RAY_AUTH_TOKEN carrying a trailing newline would make every token-mode
+// request against a Go dashboard fail the comparison.
+func TestExpectedTokenTrimsEnv(t *testing.T) {
+	clearTokenEnv(t)
+	t.Setenv(envAuthToken, "  secret-token\n")
+	if got := expectedToken(); got != "secret-token" {
+		t.Fatalf("expectedToken = %q, want the trimmed value", got)
+	}
+	if !ValidateRequestToken("Bearer secret-token") {
+		t.Fatal("a request carrying the trimmed token must be accepted")
+	}
+}
+
+// TestExpectedTokenEmptyEnvFallsThroughToPath pins the set-but-empty case: an
+// empty RAY_AUTH_TOKEN is not authoritative, matching RequestToken, so the
+// RAY_AUTH_TOKEN_PATH file still supplies the token.
+func TestExpectedTokenEmptyEnvFallsThroughToPath(t *testing.T) {
+	clearTokenEnv(t)
+	pathFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(pathFile, []byte("path-token\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envAuthTokenPath, pathFile)
+	t.Setenv(envAuthToken, "")
+	if got := expectedToken(); got != "path-token" {
+		t.Fatalf("expectedToken = %q, want the file's token", got)
+	}
+}
+
+// TestExpectedTokenRereadsRotatedFile proves the expected token follows a
+// rotated file: nothing about the value is cached, so a rotated token takes
+// effect without a restart.
+func TestExpectedTokenRereadsRotatedFile(t *testing.T) {
+	clearTokenEnv(t)
+	pathFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(pathFile, []byte("first-token\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envAuthTokenPath, pathFile)
+	if got := expectedToken(); got != "first-token" {
+		t.Fatalf("expectedToken = %q, want first-token", got)
+	}
+
+	if err := os.WriteFile(pathFile, []byte("second-token\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := expectedToken(); got != "second-token" {
+		t.Fatalf("expectedToken = %q, want the rotated token", got)
+	}
+	if ValidateRequestToken("Bearer first-token") {
+		t.Fatal("the superseded token must no longer be accepted")
+	}
+}
+
 // writeDefaultToken writes content to <home>/.ray/auth_token.
 func writeDefaultToken(t *testing.T, home, content string) {
 	t.Helper()
