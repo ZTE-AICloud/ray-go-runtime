@@ -67,7 +67,6 @@ type JobManager struct {
 	gcsClient  gcs.Client
 	logsDir    string
 	gcsAddress string
-	clusterHex string
 	nodeIP     string
 
 	jobInfoClient *JobInfoStorageClient
@@ -96,7 +95,6 @@ func NewJobManager(ctx context.Context, gcsClient gcs.Client, logsDir, nodeIP st
 		gcsClient:     gcsClient,
 		logsDir:       logsDir,
 		gcsAddress:    gcsClient.Address(),
-		clusterHex:    gcsClient.ClusterID().Hex(),
 		nodeIP:        nodeIP,
 		jobInfoClient: NewJobInfoStorageClient(gcsClient),
 		logClient:     NewJobLogStorageClient(logsDir),
@@ -479,12 +477,16 @@ func (m *JobManager) submitJob(ctx context.Context, req *JobSubmitRequest) (stri
 		runtimeEnvJSON: supervisorRuntimeEnvJSON,
 		nodeAffinity:   nodeAffinity,
 	}
+	// The python JobSupervisor in this tree takes (job_id, entrypoint,
+	// user_metadata, logs_dir): it reads the job info — including the runtime
+	// env — back from the KV through the hosting worker's GCS client, so no
+	// gcs address or cluster id is passed. The reference implementation's
+	// python supervisor carries two extra constructor parameters for that
+	// purpose; this tree's does not.
 	constructorArgs := []interface{}{
 		submissionID,
 		req.Entrypoint,
 		supervisorMetadata(req.Metadata),
-		m.gcsAddress,
-		m.clusterHex,
 		m.logsDir,
 	}
 	supervisor, err := createSupervisorActor(supervisorOpts, constructorArgs...)
