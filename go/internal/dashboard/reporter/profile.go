@@ -255,6 +255,8 @@ var launchDynologDaemon = func(logPath string, port int, bin string) (int, error
 		logFile.Close()
 		return 0, err
 	}
+	// The child holds its own duplicate of the descriptor, so close the parent's.
+	logFile.Close()
 	return cmd.Process.Pid, nil
 }
 

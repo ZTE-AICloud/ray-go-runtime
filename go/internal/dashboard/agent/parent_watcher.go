@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -152,7 +153,8 @@ func parentCheckInterval() time.Duration {
 // report_raylet_error_logs.
 func reportRayletDeath(logDir string) {
 	if logDir == "" {
-		log.Log.Info("raylet is terminated. Termination is unexpected: log dir is empty")
+		msg := "raylet is terminated. Termination is unexpected: log dir is empty"
+		log.Log.Error(fmt.Errorf("%s", msg), "raylet termination is unexpected")
 		return
 	}
 	path := filepath.Join(logDir, "raylet.out")
@@ -166,7 +168,7 @@ func reportRayletDeath(logDir string) {
 		log.Log.Info("raylet is terminated. Termination is graceful.")
 		return
 	}
-	log.Log.Info(msg)
+	log.Log.Error(fmt.Errorf("%s", msg), "raylet termination is unexpected", "log_dir", logDir)
 }
 
 // classifyRayletDeath reports whether the tail of raylet.out shows a graceful

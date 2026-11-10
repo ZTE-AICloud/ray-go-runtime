@@ -35,8 +35,9 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// gpuTestManager builds a ProfileManager wired for GPU profiling with every
-// external dependency stubbed, and restores the real seams afterwards.
+// gpuTestHooks carries the state the stubbed GPU profiling seams read and
+// record, so a test can preset the daemon pid and alive flag and assert on the
+// launches and commands it drove.
 type gpuTestHooks struct {
 	daemonLaunches int
 	daemonPid      int32
