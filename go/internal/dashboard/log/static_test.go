@@ -109,6 +109,30 @@ func TestHandleLogsNotFoundAndTraversal(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+// TestHandleLogsSymlinkedLogDirServes proves a log directory that is itself a
+// symlink still serves its files. The containment check resolves the request
+// path; resolving only one side would make every file under a symlinked log
+// directory look like an escape.
+func TestHandleLogsSymlinkedLogDirServes(t *testing.T) {
+	realDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(realDir, "a.log"), []byte("hello"), 0o644))
+	linkParent := t.TempDir()
+	linkDir := filepath.Join(linkParent, "logs")
+	require.NoError(t, os.Symlink(realDir, linkDir))
+
+	a := &LogAgentModule{logDir: linkDir}
+
+	rec := httptest.NewRecorder()
+	a.handleLogs(rec, httptest.NewRequest(http.MethodGet, "/logs/a.log", nil))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "hello", rec.Body.String())
+
+	rec = httptest.NewRecorder()
+	a.handleLogs(rec, httptest.NewRequest(http.MethodGet, "/logs", nil))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "a.log")
+}
+
 // TestHandleLogsSymlinkEscapeRejected checks that a symlink inside the log dir
 // which points outside it is refused, mirroring aiohttp's static
 // follow_symlinks=False in log_agent.py:249.

@@ -61,13 +61,25 @@ func (a *LogAgentModule) handleLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Containment is checked again after resolving symlinks so a link inside
-	// the log directory cannot expose a file outside it.
+	// the log directory cannot expose a file outside it. The base is resolved
+	// as well: the log directory itself is frequently a symlink (a container's
+	// /tmp/ray redirect, for instance), and comparing a resolved path against
+	// an unresolved base would reject every file under it.
 	final, err := filepath.EvalSymlinks(resolved)
 	if err != nil {
 		writeFileNotFound(w)
 		return
 	}
-	if base, err := filepath.Abs(a.logDir); err != nil || !inside(base, final) {
+	base, err := filepath.EvalSymlinks(a.logDir)
+	if err != nil {
+		abs, absErr := filepath.Abs(a.logDir)
+		if absErr != nil {
+			writeNotFoundText(w)
+			return
+		}
+		base = abs
+	}
+	if !inside(base, final) {
 		writeNotFoundText(w)
 		return
 	}
