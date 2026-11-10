@@ -19,6 +19,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
@@ -74,3 +75,30 @@ func GRPCStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, _ *grpc.
 	}
 	return handler(srv, ss)
 }
+
+// TokenCredential attaches the cluster bearer token to outgoing gRPC calls,
+// mirroring the client-side interceptor Python installs from
+// ray._private.grpc_utils.init_grpc_channel when token authentication is on.
+//
+// The token is resolved per RPC through RequestToken, which re-reads
+// RAY_AUTH_TOKEN_PATH every time. A credential that cached the token would keep
+// presenting a rotated-out value for the life of a long-lived channel.
+type TokenCredential struct{}
+
+var _ credentials.PerRPCCredentials = TokenCredential{}
+
+// GetRequestMetadata implements credentials.PerRPCCredentials. With
+// authentication disabled, or with no token source configured, it returns no
+// metadata so the call is byte-identical to an unauthenticated one.
+func (TokenCredential) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
+	token, ok := RequestToken()
+	if !ok {
+		return map[string]string{}, nil
+	}
+	return map[string]string{AuthorizationHeaderName: BearerPrefix + token}, nil
+}
+
+// RequireTransportSecurity reports false because agent and head communicate
+// over plaintext inside the cluster; grpc-go would otherwise refuse to send the
+// credential at all.
+func (TokenCredential) RequireTransportSecurity() bool { return false }

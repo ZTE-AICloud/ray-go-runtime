@@ -16,6 +16,8 @@ package auth
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"google.golang.org/grpc"
@@ -159,5 +161,65 @@ func TestGRPCInterceptorRoutesK8sModeToTheValidator(t *testing.T) {
 	}
 	if called {
 		t.Fatal("handler ran; the interceptor used the static token instead of the k8s validator")
+	}
+}
+
+func TestTokenCredentialAttachesBearerToken(t *testing.T) {
+	t.Setenv("RAY_AUTH_MODE", "token")
+	t.Setenv("RAY_AUTH_TOKEN", "secret")
+
+	md, err := TokenCredential{}.GetRequestMetadata(context.Background())
+	if err != nil {
+		t.Fatalf("GetRequestMetadata: %v", err)
+	}
+	if got := md[AuthorizationHeaderName]; got != "Bearer secret" {
+		t.Fatalf("%s = %q, want %q", AuthorizationHeaderName, got, "Bearer secret")
+	}
+	if (TokenCredential{}).RequireTransportSecurity() {
+		t.Fatal("RequireTransportSecurity must be false: agents and heads talk over plaintext in-cluster")
+	}
+}
+
+func TestTokenCredentialIsEmptyWhenAuthDisabled(t *testing.T) {
+	t.Setenv("RAY_AUTH_MODE", "")
+	t.Setenv("RAY_AUTH_TOKEN", "secret")
+
+	md, err := TokenCredential{}.GetRequestMetadata(context.Background())
+	if err != nil {
+		t.Fatalf("GetRequestMetadata: %v", err)
+	}
+	if len(md) != 0 {
+		t.Fatalf("metadata = %v, want none", md)
+	}
+}
+
+func TestTokenCredentialRereadsRotatedTokenFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "token")
+	if err := os.WriteFile(path, []byte("first\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("RAY_AUTH_MODE", "token")
+	t.Setenv("RAY_AUTH_TOKEN", "")
+	t.Setenv("RAY_AUTH_TOKEN_PATH", path)
+
+	cred := TokenCredential{}
+	first, err := cred.GetRequestMetadata(context.Background())
+	if err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	if got := first[AuthorizationHeaderName]; got != "Bearer first" {
+		t.Fatalf("first token = %q, want %q", got, "Bearer first")
+	}
+
+	if err := os.WriteFile(path, []byte("second\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second, err := cred.GetRequestMetadata(context.Background())
+	if err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+	if got := second[AuthorizationHeaderName]; got != "Bearer second" {
+		t.Fatalf("rotated token = %q, want %q (a cached credential authenticates with a stale value)", got, "Bearer second")
 	}
 }
