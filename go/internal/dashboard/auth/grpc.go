@@ -17,6 +17,7 @@ package auth
 import (
 	"context"
 	"os"
+	"strings"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -47,7 +48,13 @@ func authenticateGRPC(ctx context.Context) error {
 	// credentials only in TOKEN mode (GetAuthenticationMode maps "k8s" to
 	// DISABLED), so enforcing here in k8s mode would reject the raylet's
 	// unauthenticated metrics and health-check calls.
-	if os.Getenv("RAY_AUTH_MODE") != "token" {
+	// Compare case-insensitively: C++ lowercases the value before comparing,
+	// Python inherits that through the raylet binding, and this repo's own
+	// gcs dial layer (go/pkg/gcs/env.go) uses EqualFold. A case-sensitive
+	// comparison would leave the gRPC services open under RAY_AUTH_MODE=TOKEN
+	// while the raylet authenticated its calls. No TrimSpace: neither the C++
+	// comparison nor the Python one trims.
+	if !strings.EqualFold(os.Getenv("RAY_AUTH_MODE"), "token") {
 		return nil
 	}
 	md, ok := metadata.FromIncomingContext(ctx)

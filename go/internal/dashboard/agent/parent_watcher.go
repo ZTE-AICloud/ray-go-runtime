@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -140,14 +141,19 @@ func rayletPid() (int, bool) {
 
 // parentCheckInterval returns the poll interval from
 // RAY_DASHBOARD_AGENT_CHECK_PARENT_INTERVAL_S seconds, falling back to the
-// default when it is unset or not positive.
+// default when it is unset, not positive, or not representable as a duration.
 func parentCheckInterval() time.Duration {
-	if secs := common.EnvFloat(parentCheckIntervalSEnvName, 0); secs > 0 {
-		// A positive float can still convert to a non-positive duration: a
-		// sub-nanosecond fraction truncates to zero and an astronomical value
-		// overflows the int64 nanosecond count. time.NewTicker panics on a
-		// non-positive interval, and the panic would fire inside the watcher
-		// goroutine, taking the agent down at startup.
+	if secs := common.EnvFloat(parentCheckIntervalSEnvName, 0); secs > 0 && secs <= float64(math.MaxInt64/int64(time.Second)) {
+		// A positive float can still convert to a non-positive duration on
+		// amd64 (out-of-range conversion yields MinInt64), and on arm64 the
+		// same conversion saturates to a positive MaxInt64 that would pass a
+		// d > 0 check and yield a ~292-year interval. Bounding the seconds
+		// against the largest representable value before converting makes
+		// the fallback deterministic across architectures. A sub-nanosecond
+		// fraction truncates to zero, so the zero guard is kept too:
+		// time.NewTicker panics on a non-positive interval, and the panic
+		// would fire inside the watcher goroutine, taking the agent down at
+		// startup.
 		if d := time.Duration(secs * float64(time.Second)); d > 0 {
 			return d
 		}

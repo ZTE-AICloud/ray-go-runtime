@@ -66,6 +66,7 @@ func TestGRPCUnaryInterceptor(t *testing.T) {
 		{name: "wrong token rejected", authMode: "token", token: "secret", withMeta: true, header: "Bearer nope", wantCalled: false, wantCode: codes.Unauthenticated},
 		{name: "non-bearer header rejected", authMode: "token", token: "secret", withMeta: true, header: "secret", wantCalled: false, wantCode: codes.Unauthenticated},
 		{name: "k8s mode is a no-op", authMode: "k8s", token: "secret", withMeta: true, header: "Bearer secret", wantCalled: true},
+		{name: "TOKEN uppercase is enforced", authMode: "TOKEN", token: "secret", withMeta: true, header: "", wantCalled: false, wantCode: codes.Unauthenticated},
 	}
 
 	for _, tc := range tests {

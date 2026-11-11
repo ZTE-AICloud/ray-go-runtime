@@ -236,6 +236,28 @@ func TestGpuProfileStopsWaitingWhenTheContextIsCancelled(t *testing.T) {
 	}
 }
 
+// TestGpuProfileStopsWaitingWhenTheDeadlineExpires pins that a caller-imposed
+// RPC deadline shorter than the internal wait surfaces as a deadline error, not
+// the internal timeout reply. Only an expired context can end this wait: the
+// internal timeout is 60s and the stubbed command never creates a trace file.
+func TestGpuProfileStopsWaitingWhenTheDeadlineExpires(t *testing.T) {
+	hooks := &gpuTestHooks{daemonPid: 777, daemonAlive: true}
+	m := newGPUManager(t, true, hooks)
+	gpuProfileTimeoutSeconds = 60
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(30*time.Millisecond))
+	defer cancel()
+
+	success, output, err := m.GpuProfile(ctx, 1234, 10)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want a context.DeadlineExceeded error", err)
+	}
+	if success || output != "" {
+		t.Fatalf("GpuProfile = (%v, %q, %v), want the (false, \"\", err) shape", success, output, err)
+	}
+}
+
 func TestGpuProfileSucceedsWhenTheTraceFileAppears(t *testing.T) {
 	hooks := &gpuTestHooks{daemonPid: 777, daemonAlive: true}
 	m := newGPUManager(t, true, hooks)

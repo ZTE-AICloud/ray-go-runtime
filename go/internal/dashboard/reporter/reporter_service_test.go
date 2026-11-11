@@ -181,6 +181,28 @@ func TestReporterServiceGpuProfilingWithoutDaemonReturnsUnknownStatus(t *testing
 	}
 }
 
+// TestReporterServiceGpuProfilingMapsExpiredContextToDeadlineExceeded pins the
+// handler-level mapping: a caller whose RPC deadline expires during the trace
+// wait must see codes.DeadlineExceeded, not codes.Unknown, so client retry and
+// timeout logic keyed off that code behaves as it does against the Python agent.
+func TestReporterServiceGpuProfilingMapsExpiredContextToDeadlineExceeded(t *testing.T) {
+	s := &ReporterService{profileManager: newGPUManager(t, true, &gpuTestHooks{daemonPid: 777, daemonAlive: true})}
+	// Only the caller's deadline can end the wait: the internal timeout is far
+	// away and the stubbed command never creates a trace file.
+	gpuProfileTimeoutSeconds = 60
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(30*time.Millisecond))
+	defer cancel()
+
+	rep, err := s.GpuProfiling(ctx, &proto.GpuProfilingRequest{Pid: 1234, NumIterations: u32p(10)})
+	if code := status.Code(err); code != codes.DeadlineExceeded {
+		t.Fatalf("GpuProfiling status code = %v, want %v", code, codes.DeadlineExceeded)
+	}
+	if rep != nil {
+		t.Fatalf("GpuProfiling reply = %v, want nil alongside the error", rep)
+	}
+}
+
 func TestReporterServiceGpuProfilingPropagatesNodeIP(t *testing.T) {
 	s, err := NewReporterService(agent.Config{LogDir: t.TempDir(), NodeIP: "192.168.9.9"})
 	if err != nil {

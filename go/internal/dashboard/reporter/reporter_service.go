@@ -114,10 +114,14 @@ func (s *ReporterService) GpuProfiling(ctx context.Context, req *proto.GpuProfil
 	}
 	success, output, err := s.profileManager.GpuProfile(ctx, int(req.GetPid()), int(req.GetNumIterations()))
 	if err != nil {
-		// A cancelled request context means the caller is gone, so the reply can
-		// never be delivered; report the cancellation instead of a timeout.
-		if errors.Is(err, context.Canceled) {
-			return nil, status.Error(codes.Canceled, ctx.Err().Error())
+		// A cancelled or expired request context means the caller is gone, so
+		// the reply can never be delivered; surface the context sentinel rather
+		// than a timeout. Map both sentinels: a caller that set an RPC deadline
+		// shorter than the internal wait sees context.DeadlineExceeded, and a
+		// client keying retry logic off codes.DeadlineExceeded must not receive
+		// codes.Unknown.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, status.FromContextError(err).Err()
 		}
 		// Python raises RuntimeError here, which the RPC surfaces as an error
 		// rather than a reply with success=false.
