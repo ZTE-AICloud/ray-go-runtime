@@ -166,19 +166,19 @@ func parentCheckInterval() time.Duration {
 // report_raylet_error_logs.
 func reportRayletDeath(logDir string) {
 	if logDir == "" {
-		msg := "raylet is terminated. Termination is unexpected: log dir is empty"
+		msg := "Raylet is terminated. Termination is unexpected: log dir is empty"
 		log.Log.Error(fmt.Errorf("%s", msg), "raylet termination is unexpected")
 		return
 	}
 	path := filepath.Join(logDir, "raylet.out")
 	lines, err := tailFileLines(path, rayletLogTailSize)
 	if err != nil {
-		log.Log.Error(err, "raylet is terminated. Failed to read raylet logs", "path", path)
+		log.Log.Error(err, "Raylet is terminated. Failed to read Raylet logs", "path", path)
 		return
 	}
 	graceful, msg := classifyRayletDeath(lines)
 	if graceful {
-		log.Log.Info("raylet is terminated. Termination is graceful.")
+		log.Log.Info("Raylet is terminated. Termination is graceful.")
 		return
 	}
 	log.Log.Error(fmt.Errorf("%s", msg), "raylet termination is unexpected", "log_dir", logDir)
@@ -194,7 +194,7 @@ func classifyRayletDeath(lines []string) (graceful bool, msg string) {
 			return true, ""
 		}
 	}
-	msg = "raylet is terminated. Termination is unexpected. Possible reasons " +
+	msg = "Raylet is terminated. Termination is unexpected. Possible reasons " +
 		"include: (1) SIGKILL by the user or system OOM killer, " +
 		"(2) Invalid memory access from Raylet causing SIGSEGV or SIGBUS, " +
 		"(3) Other termination signals. Last " +
@@ -202,7 +202,12 @@ func classifyRayletDeath(lines []string) (graceful bool, msg string) {
 	if n := len(lines); n > rayletLogMaxPublishLines {
 		lines = lines[n-rayletLogMaxPublishLines:]
 	}
-	return false, msg + strings.Join(lines, "\n")
+	// Python renders `"    " + "    ".join(last_20_lines)`, where every
+	// readlines() element still carries its trailing newline, so each tail line
+	// ends up prefixed with four spaces. These lines were split on the newline
+	// and carry none, so the same rendering is a four-space prefix plus a
+	// newline-and-four-space join.
+	return false, msg + "    " + strings.Join(lines, "\n    ")
 }
 
 // tailFileLines reads at most tailSize bytes from the end of path and returns

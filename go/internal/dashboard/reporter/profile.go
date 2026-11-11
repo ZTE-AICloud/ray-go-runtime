@@ -268,12 +268,44 @@ var launchDynologDaemon = func(logPath string, port int, bin string) (int, error
 // dyno on the build machine.
 var lookPath = exec.LookPath
 
-// probeNodeHasGPUs runs nvidia-smi and reports whether it succeeded,
-// mirroring the Python GpuProfilingManager.node_has_gpus. Any failure (binary
-// missing, non-zero exit, permission denied) counts as "no GPUs".
+// gpuProbeTimeout bounds the nvidia-smi probe, mirroring the Python
+// GpuProfilingManager.node_has_gpus timeout=10. The probe runs in the
+// reporter constructor on the agent startup path, so an unbounded probe on a
+// wedged GPU driver would hang the agent before it binds any port. A variable
+// so tests can collapse it.
+var gpuProbeTimeout = 10 * time.Second
+
+// gpuProbeBinary and gpuProbeArgs are the probe argv, reproducing the Python
+// GpuProfilingManager.node_has_gpus command verbatim. They are variables so
+// tests can point the probe at a fake process instead of relying on the build
+// machine's nvidia-smi; the command is still built by probeNodeHasGPUs, so the
+// timeout under test stays in production code.
+var (
+	gpuProbeBinary = "nvidia-smi"
+	gpuProbeArgs   = []string{"--query-gpu=name", "--format=csv,noheader"}
+)
+
+// probeNodeHasGPUs runs nvidia-smi and reports whether it succeeded, mirroring
+// the Python GpuProfilingManager.node_has_gpus: the same arguments Python
+// passes, a 10-second timeout, a warning on timeout, and any other failure
+// (binary missing, non-zero exit, permission denied) counts as "no GPUs".
 func probeNodeHasGPUs() bool {
-	_, err := runCommand("nvidia-smi")
-	return err == nil
+	ctx, cancel := context.WithTimeout(context.Background(), gpuProbeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, gpuProbeBinary, gpuProbeArgs...)
+	// stderr=subprocess.DEVNULL in Python: the failure detail is not used, and
+	// a nil writer makes os/exec discard the child's output rather than
+	// inherit the agent's stdio.
+	cmd.Stderr = nil
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			// go/pkg/log has no Warning level, so Info (visible by default) is
+			// used, matching the Python logger.warning call site.
+			log.Log.Info("nvidia-smi command timed out after 10s. GPU profiling may not function correctly.")
+		}
+		return false
+	}
+	return true
 }
 
 // nodeHasGPUs reports whether this node has GPUs. It is a package-level

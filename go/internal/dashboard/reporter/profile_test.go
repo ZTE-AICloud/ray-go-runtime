@@ -2,7 +2,6 @@ package reporter
 
 import (
 	"context"
-	"errors"
 	"os"
 	"os/exec"
 	"strconv"
@@ -1287,37 +1286,71 @@ func TestProfileManagerGpuProfilingEnabledRequiresAll(t *testing.T) {
 	}
 }
 
+// stubGPUProbeArgv points the nvidia-smi probe at a fake binary for the
+// duration of a test, so no test depends on the build machine's nvidia-smi.
+func stubGPUProbeArgv(t *testing.T, binary string, args ...string) {
+	t.Helper()
+	origBinary, origArgs := gpuProbeBinary, gpuProbeArgs
+	gpuProbeBinary, gpuProbeArgs = binary, args
+	t.Cleanup(func() { gpuProbeBinary, gpuProbeArgs = origBinary, origArgs })
+}
+
+// TestGPUProbeMatchesPythonArguments pins the probe argv to the command
+// GpuProfilingManager.node_has_gpus runs.
+func TestGPUProbeMatchesPythonArguments(t *testing.T) {
+	if gpuProbeBinary != "nvidia-smi" {
+		t.Errorf("gpuProbeBinary = %q, want %q", gpuProbeBinary, "nvidia-smi")
+	}
+	want := []string{"--query-gpu=name", "--format=csv,noheader"}
+	if strings.Join(gpuProbeArgs, " ") != strings.Join(want, " ") {
+		t.Errorf("gpuProbeArgs = %v, want %v", gpuProbeArgs, want)
+	}
+}
+
 // TestProbeNodeHasGPUs covers the production nvidia-smi probe: only a
 // successful exit counts as "GPUs present".
 func TestProbeNodeHasGPUs(t *testing.T) {
-	orig := runCommand
-	defer func() { runCommand = orig }()
+	cases := []struct {
+		name string
+		argv []string
+		want bool
+	}{
+		{"success", []string{"/bin/true"}, true},
+		{"missing binary", []string{"/nonexistent/nvidia-smi"}, false},
+		{"non-zero exit", []string{"/bin/false"}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			stubGPUProbeArgv(t, c.argv[0], c.argv[1:]...)
+			if got := probeNodeHasGPUs(); got != c.want {
+				t.Errorf("probeNodeHasGPUs() = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
 
-	runCommand = func(name string, arg ...string) ([]byte, error) {
-		if name != "nvidia-smi" {
-			t.Errorf("probe ran %q, want nvidia-smi", name)
-		}
-		if len(arg) != 0 {
-			t.Errorf("probe args = %v, want none", arg)
-		}
-		return []byte("GPU 0: Tesla T4\n"), nil
-	}
-	if !probeNodeHasGPUs() {
-		t.Error("probeNodeHasGPUs() = false when nvidia-smi succeeds, want true")
-	}
+// TestProbeNodeHasGPUsHonoursTheTimeout pins the timeout contract: a probe that
+// never returns must be killed at gpuProbeTimeout and report "no GPUs" instead
+// of blocking the reporter constructor, which runs on the agent startup path.
+func TestProbeNodeHasGPUsHonoursTheTimeout(t *testing.T) {
+	const collapsed = 50 * time.Millisecond
+	origTimeout := gpuProbeTimeout
+	gpuProbeTimeout = collapsed
+	t.Cleanup(func() { gpuProbeTimeout = origTimeout })
 
-	runCommand = func(name string, arg ...string) ([]byte, error) {
-		return nil, exec.ErrNotFound
-	}
+	// A child that outlives the collapsed timeout by a wide margin.
+	stubGPUProbeArgv(t, "/bin/sleep", "30")
+
+	start := time.Now()
 	if probeNodeHasGPUs() {
-		t.Error("probeNodeHasGPUs() = true when nvidia-smi is missing, want false")
+		t.Fatal("probeNodeHasGPUs() = true for a probe that never exits, want false")
 	}
-
-	runCommand = func(name string, arg ...string) ([]byte, error) {
-		return []byte("NVIDIA-SMI has failed"), errors.New("exit status 9")
+	elapsed := time.Since(start)
+	if elapsed >= 2*time.Second {
+		t.Fatalf("probe took %v, want it bounded by gpuProbeTimeout (%v): the probe is unbounded", elapsed, collapsed)
 	}
-	if probeNodeHasGPUs() {
-		t.Error("probeNodeHasGPUs() = true when nvidia-smi exits non-zero, want false")
+	if elapsed < collapsed {
+		t.Fatalf("probe returned after %v, want at least gpuProbeTimeout (%v) so the timeout was the reason", elapsed, collapsed)
 	}
 }
 

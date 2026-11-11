@@ -66,6 +66,7 @@ func TestGRPCUnaryInterceptor(t *testing.T) {
 		{name: "wrong token rejected", authMode: "token", token: "secret", withMeta: true, header: "Bearer nope", wantCalled: false, wantCode: codes.Unauthenticated},
 		{name: "non-bearer header rejected", authMode: "token", token: "secret", withMeta: true, header: "secret", wantCalled: false, wantCode: codes.Unauthenticated},
 		{name: "k8s mode is a no-op", authMode: "k8s", token: "secret", withMeta: true, header: "Bearer secret", wantCalled: true},
+		{name: "K8S uppercase mode is a no-op", authMode: "K8S", token: "secret", withMeta: true, header: "", wantCalled: true},
 		{name: "TOKEN uppercase is enforced", authMode: "TOKEN", token: "secret", withMeta: true, header: "", wantCalled: false, wantCode: codes.Unauthenticated},
 	}
 
@@ -183,6 +184,23 @@ func TestTokenCredentialAttachesBearerToken(t *testing.T) {
 	}
 	if (TokenCredential{}).RequireTransportSecurity() {
 		t.Fatal("RequireTransportSecurity must be false: agents and heads talk over plaintext in-cluster")
+	}
+}
+
+// TestTokenCredentialAttachesTokenInUppercaseMode pins that the client side
+// agrees with the interceptor on what "enabled" means: under RAY_AUTH_MODE=TOKEN
+// the head must attach the token, or the interceptor that enforces in that mode
+// would reject the head's own calls.
+func TestTokenCredentialAttachesTokenInUppercaseMode(t *testing.T) {
+	t.Setenv("RAY_AUTH_MODE", "TOKEN")
+	t.Setenv("RAY_AUTH_TOKEN", "secret")
+
+	md, err := TokenCredential{}.GetRequestMetadata(context.Background())
+	if err != nil {
+		t.Fatalf("GetRequestMetadata: %v", err)
+	}
+	if got := md[AuthorizationHeaderName]; got != "Bearer secret" {
+		t.Fatalf("%s = %q, want %q", AuthorizationHeaderName, got, "Bearer secret")
 	}
 }
 

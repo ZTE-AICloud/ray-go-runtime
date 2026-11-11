@@ -220,14 +220,29 @@ func TestClassifyRayletDeathHandlesUnexpectedExit(t *testing.T) {
 	if graceful {
 		t.Fatal("classifyRayletDeath = graceful=true for a log without the SIGTERM marker, want false")
 	}
+	if !strings.HasPrefix(msg, "Raylet is terminated. ") {
+		t.Errorf("message %q does not start with the Python prefix %q", msg, "Raylet is terminated. ")
+	}
 	if !strings.Contains(msg, "Termination is unexpected") {
 		t.Errorf("message %q does not report an unexpected termination", msg)
 	}
 	if strings.Contains(msg, firstLine) {
 		t.Errorf("message %q contains the first line, want only the last %d lines", msg, rayletLogMaxPublishLines)
 	}
-	if !strings.Contains(msg, "last line") {
-		t.Errorf("message %q does not contain the last line of the log", msg)
+	if !strings.Contains(msg, "    last line") {
+		t.Errorf("message %q does not contain the last line prefixed with four spaces", msg)
+	}
+	// Python joins the tail as `"    " + "    ".join(lines)`, so every surfaced
+	// line is prefixed with four spaces and nothing else is added.
+	const tailHeader = "lines of the Raylet logs:\n"
+	idx := strings.Index(msg, tailHeader)
+	if idx < 0 {
+		t.Fatalf("message %q does not contain the tail header %q", msg, tailHeader)
+	}
+	for _, line := range strings.Split(strings.TrimSuffix(msg[idx+len(tailHeader):], "\n"), "\n") {
+		if !strings.HasPrefix(line, "    ") {
+			t.Errorf("tail line %q is not prefixed with four spaces", line)
+		}
 	}
 }
 
