@@ -64,6 +64,17 @@ func TestParentCheckIntervalFallsBackWhenUnsetOrNonPositive(t *testing.T) {
 	if got := parentCheckInterval(); got != 10*time.Millisecond {
 		t.Fatalf("interval = %v, want 10ms", got)
 	}
+	// A positive float can still convert to a non-positive duration. Both of
+	// these fall back to the default rather than reaching time.NewTicker, which
+	// panics on a non-positive interval.
+	t.Setenv(parentCheckIntervalSEnvName, "1e-12")
+	if got := parentCheckInterval(); got != defaultParentCheckInterval {
+		t.Fatalf("interval = %v, want the default for a sub-nanosecond override", got)
+	}
+	t.Setenv(parentCheckIntervalSEnvName, "1e30")
+	if got := parentCheckInterval(); got != defaultParentCheckInterval {
+		t.Fatalf("interval = %v, want the default for an overflowing override", got)
+	}
 }
 
 // TestParentWatcherCancelsOnlyAfterTheThreshold proves a single missed poll is

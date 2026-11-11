@@ -15,6 +15,8 @@
 package reporter
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -105,7 +107,7 @@ func TestGpuProfileDisabledNodeReturnsTheDisabledMessage(t *testing.T) {
 	hooks := &gpuTestHooks{}
 	m := newGPUManager(t, false, hooks)
 
-	success, output, err := m.GpuProfile(1234, 10)
+	success, output, err := m.GpuProfile(context.Background(), 1234, 10)
 	if err != nil {
 		t.Fatalf("GpuProfile: %v", err)
 	}
@@ -123,7 +125,7 @@ func TestGpuProfileDisabledNodeReturnsTheDisabledMessage(t *testing.T) {
 func TestGpuProfileWithoutDaemonReturnsAnError(t *testing.T) {
 	m := newGPUManager(t, true, &gpuTestHooks{})
 
-	_, _, err := m.GpuProfile(1234, 10)
+	_, _, err := m.GpuProfile(context.Background(), 1234, 10)
 	if err == nil {
 		t.Fatal("GpuProfile returned no error although the daemon was never started")
 	}
@@ -136,7 +138,7 @@ func TestGpuProfileWithDeadDaemonReturnsTheDaemonMessage(t *testing.T) {
 	hooks := &gpuTestHooks{daemonPid: 777, daemonAlive: false}
 	m := newGPUManager(t, true, hooks)
 
-	success, output, err := m.GpuProfile(1234, 10)
+	success, output, err := m.GpuProfile(context.Background(), 1234, 10)
 	if err != nil {
 		t.Fatalf("GpuProfile: %v", err)
 	}
@@ -153,7 +155,7 @@ func TestGpuProfileWithDeadTargetReturnsTheDeadProcessMessage(t *testing.T) {
 	m := newGPUManager(t, true, hooks)
 	gpuProfilingPIDAlive = func(int) bool { return false }
 
-	success, output, err := m.GpuProfile(1234, 10)
+	success, output, err := m.GpuProfile(context.Background(), 1234, 10)
 	if err != nil {
 		t.Fatalf("GpuProfile: %v", err)
 	}
@@ -173,7 +175,7 @@ func TestGpuProfileNoProcessesMatched(t *testing.T) {
 	}
 	m := newGPUManager(t, true, hooks)
 
-	success, output, err := m.GpuProfile(1234, 10)
+	success, output, err := m.GpuProfile(context.Background(), 1234, 10)
 	if err != nil {
 		t.Fatalf("GpuProfile: %v", err)
 	}
@@ -189,7 +191,7 @@ func TestGpuProfileTimesOutWithoutATraceFile(t *testing.T) {
 	hooks := &gpuTestHooks{daemonPid: 777, daemonAlive: true}
 	m := newGPUManager(t, true, hooks)
 
-	success, output, err := m.GpuProfile(1234, 10)
+	success, output, err := m.GpuProfile(context.Background(), 1234, 10)
 	if err != nil {
 		t.Fatalf("GpuProfile: %v", err)
 	}
@@ -198,6 +200,39 @@ func TestGpuProfileTimesOutWithoutATraceFile(t *testing.T) {
 	}
 	if !strings.Contains(output, "GPU profiling timed out after 5 seconds, please try again.") {
 		t.Fatalf("output = %q, want the timeout message", output)
+	}
+}
+
+// TestGpuProfileStopsWaitingWhenTheContextIsCancelled pins that the trace-file
+// poll loop observes cancellation. Without it a disconnected caller leaves the
+// goroutine polling until the timeout, which the Python coroutine (cancelled
+// with the RPC) never does.
+func TestGpuProfileStopsWaitingWhenTheContextIsCancelled(t *testing.T) {
+	hooks := &gpuTestHooks{daemonPid: 777, daemonAlive: true}
+	m := newGPUManager(t, true, hooks)
+	// Only cancellation can end the wait: the timeout is far away and the
+	// stubbed command never creates a trace file.
+	gpuProfileTimeoutSeconds = 60
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(20*time.Millisecond, cancel)
+	defer cancel()
+
+	start := time.Now()
+	success, output, err := m.GpuProfile(ctx, 1234, 10)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatalf("GpuProfile returned no error; success = %v, output = %q", success, output)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want a context.Canceled error", err)
+	}
+	if success || output != "" {
+		t.Fatalf("GpuProfile = (%v, %q, %v), want the (false, \"\", err) shape", success, output, err)
+	}
+	if elapsed >= 30*time.Second {
+		t.Fatalf("GpuProfile returned after %v, want well before the 60s timeout", elapsed)
 	}
 }
 
@@ -213,7 +248,7 @@ func TestGpuProfileSucceedsWhenTheTraceFileAppears(t *testing.T) {
 		return CommandResult{ExitCode: 0}
 	}
 
-	success, output, err := m.GpuProfile(1234, 10)
+	success, output, err := m.GpuProfile(context.Background(), 1234, 10)
 	if err != nil {
 		t.Fatalf("GpuProfile: %v", err)
 	}

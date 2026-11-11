@@ -102,6 +102,46 @@ func TestAgentGRPCRequiresTokenWithAuthEnabled(t *testing.T) {
 	}
 }
 
+// TestAgentGRPCIsOpenInK8sMode is the regression test for the token-mode-only
+// gate. Enforcement is token-mode only, mirroring Python's
+// is_token_auth_enabled(), so a tokenless call in k8s mode must reach the
+// handler. An implementation that gates on TokenAuthEnabled() (true for k8s as
+// well) rejects it with Unauthenticated and fails this test.
+func TestAgentGRPCIsOpenInK8sMode(t *testing.T) {
+	t.Setenv("RAY_AUTH_MODE", "k8s")
+	// A static comparison would accept this token, so a rejection here cannot
+	// be blamed on a missing expected value.
+	t.Setenv("RAY_AUTH_TOKEN", "secret")
+
+	mod, err := log.New(agent.Config{LogDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("log.New: %v", err)
+	}
+	addr, stop, err := agent.ServeGRPCServerForTest(agent.Config{NodeIP: "127.0.0.1"}, []agent.Module{mod})
+	if err != nil {
+		t.Fatalf("ServeGRPCServerForTest: %v", err)
+	}
+	defer stop()
+
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	client := proto.NewLogServiceClient(conn)
+
+	stream, err := client.StreamLog(context.Background(), &proto.StreamLogRequest{})
+	if err == nil {
+		_, err = stream.Recv()
+	}
+	// Any status other than Unauthenticated proves the interceptor let the call
+	// reach the handler; the log service itself may then fail for reasons
+	// unrelated to authentication.
+	if got := status.Code(err); got == codes.Unauthenticated {
+		t.Fatalf("code = %v (err %v), want anything but Unauthenticated: k8s mode must not enforce", got, err)
+	}
+}
+
 // TestAgentGRPCRequiresTokenForUnaryRPC covers the unary chain: the stream
 // test alone cannot tell whether GRPCUnaryServerInterceptor is chained on, so a
 // tokenless unary call must also be rejected.

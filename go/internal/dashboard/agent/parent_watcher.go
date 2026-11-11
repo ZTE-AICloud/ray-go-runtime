@@ -143,7 +143,14 @@ func rayletPid() (int, bool) {
 // default when it is unset or not positive.
 func parentCheckInterval() time.Duration {
 	if secs := common.EnvFloat(parentCheckIntervalSEnvName, 0); secs > 0 {
-		return time.Duration(secs * float64(time.Second))
+		// A positive float can still convert to a non-positive duration: a
+		// sub-nanosecond fraction truncates to zero and an astronomical value
+		// overflows the int64 nanosecond count. time.NewTicker panics on a
+		// non-positive interval, and the panic would fire inside the watcher
+		// goroutine, taking the agent down at startup.
+		if d := time.Duration(secs * float64(time.Second)); d > 0 {
+			return d
+		}
 	}
 	return defaultParentCheckInterval
 }

@@ -1,6 +1,7 @@
 package reporter
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -1112,7 +1113,7 @@ func TestProfileGpuProfileRejectsInvalidPID(t *testing.T) {
 	m := newTestManager(t, t.TempDir())
 
 	for _, pid := range []int{0, -1, -1234} {
-		success, output, err := m.GpuProfile(pid, 10)
+		success, output, err := m.GpuProfile(context.Background(), pid, 10)
 		if err != nil {
 			t.Errorf("GpuProfile(pid=%d) error = %v, want nil", pid, err)
 		}
@@ -1129,7 +1130,7 @@ func TestProfileGpuProfileDisabledWithoutGPUs(t *testing.T) {
 	stubGpuProfiling(t, false, "/usr/bin/dynolog", "/usr/bin/dyno", func(int) bool { return true })
 	m := newTestManager(t, t.TempDir())
 
-	success, output, err := m.GpuProfile(123, 10)
+	success, output, err := m.GpuProfile(context.Background(), 123, 10)
 	if err != nil {
 		t.Errorf("GpuProfile error = %v, want nil (a disabled node is a reply, not an error)", err)
 	}
@@ -1160,7 +1161,7 @@ func TestProfileGpuProfileDisabledWithoutDynolog(t *testing.T) {
 			stubGpuProfiling(t, true, tc.dynologPath, tc.dynoPath, func(int) bool { return true })
 			m := newTestManager(t, t.TempDir())
 
-			success, output, err := m.GpuProfile(123, 10)
+			success, output, err := m.GpuProfile(context.Background(), 123, 10)
 			if err != nil {
 				t.Errorf("GpuProfile error = %v, want nil (a missing tool is a reply, not an error)", err)
 			}
@@ -1178,7 +1179,7 @@ func TestProfileGpuProfileDeadProcess(t *testing.T) {
 	stubGpuProfiling(t, true, "/usr/bin/dynolog", "/usr/bin/dyno", func(int) bool { return false })
 	m := newGPUManagerWithDaemon(t)
 
-	success, output, err := m.GpuProfile(4242, 10)
+	success, output, err := m.GpuProfile(context.Background(), 4242, 10)
 	if err != nil {
 		t.Errorf("GpuProfile error = %v, want nil (a dead target is a reply, not an error)", err)
 	}
@@ -1204,7 +1205,7 @@ func TestProfileGpuProfileDisabledTakesPrecedence(t *testing.T) {
 	stubGpuProfiling(t, false, "", "", func(int) bool { return false })
 	m := newTestManager(t, t.TempDir())
 
-	success, output, err := m.GpuProfile(4242, 10)
+	success, output, err := m.GpuProfile(context.Background(), 4242, 10)
 	if err != nil {
 		t.Errorf("GpuProfile error = %v, want nil (a disabled node wins over the dead process)", err)
 	}
@@ -1232,7 +1233,7 @@ func TestProfileGpuProfileWithoutDaemonReturnsError(t *testing.T) {
 	defer func() { runCommandDetail = orig }()
 
 	m := newTestManager(t, t.TempDir())
-	success, output, err := m.GpuProfile(123, 10)
+	success, output, err := m.GpuProfile(context.Background(), 123, 10)
 
 	if err == nil {
 		t.Fatal("GpuProfile returned no error although no daemon was started")

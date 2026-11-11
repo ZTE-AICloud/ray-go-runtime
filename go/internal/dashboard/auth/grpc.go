@@ -16,6 +16,7 @@ package auth
 
 import (
 	"context"
+	"os"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -32,13 +33,21 @@ const unauthenticatedMessage = "Invalid or missing authentication token"
 // authenticateGRPC validates the authorization metadata of an incoming gRPC
 // request, mirroring the Python AsyncAuthenticationServerInterceptor: when
 // token authentication is not enabled every request is allowed, and when it is
-// enabled the request must carry a valid bearer token.
+// enabled the request must carry a valid bearer token. Token authentication
+// here means RAY_AUTH_MODE=token only, not the broader TokenAuthEnabled() the
+// HTTP middleware uses.
 //
 // Only the "authorization" metadata entry is consulted. The HTTP middleware
 // additionally accepts the x-ray-authorization header and the authentication
 // cookie, but the Python gRPC interceptor does not, so neither does this.
 func authenticateGRPC(ctx context.Context) error {
-	if !TokenAuthEnabled() {
+	// Enforce only in token mode, mirroring Python's is_token_auth_enabled(),
+	// which is true only when the mode is TOKEN, and the gate agent.py uses
+	// before installing its gRPC interceptor. The C++ raylet attaches client
+	// credentials only in TOKEN mode (GetAuthenticationMode maps "k8s" to
+	// DISABLED), so enforcing here in k8s mode would reject the raylet's
+	// unauthenticated metrics and health-check calls.
+	if os.Getenv("RAY_AUTH_MODE") != "token" {
 		return nil
 	}
 	md, ok := metadata.FromIncomingContext(ctx)

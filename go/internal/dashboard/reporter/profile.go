@@ -257,6 +257,9 @@ var launchDynologDaemon = func(logPath string, port int, bin string) (int, error
 	}
 	// The child holds its own duplicate of the descriptor, so close the parent's.
 	logFile.Close()
+	// Reap the daemon when it exits so it does not linger as a zombie in the
+	// agent's process table until the agent itself terminates.
+	go func() { _ = cmd.Wait() }()
 	return cmd.Process.Pid, nil
 }
 
@@ -531,10 +534,12 @@ func (m *ProfileManager) StartMonitoringDaemon() {
 // GpuProfile runs `dyno gputrace` against pid and waits for the trace file it
 // produces, mirroring GpuProfilingManager.gpu_profile. The returned string is
 // the trace file path relative to the log directory, or an error message. A
-// non-nil error is reserved for the state Python models as an exception (the
-// daemon was never started), which the caller surfaces as a gRPC error rather
-// than as a failed-but-successful reply.
-func (m *ProfileManager) GpuProfile(pid int, numIterations int) (bool, string, error) {
+// non-nil error is reserved for the states Python models as an exception (the
+// daemon was never started, or the request context was cancelled), which the
+// caller surfaces as a gRPC error rather than as a failed-but-successful reply.
+// ctx bounds the wait for the trace file so a disconnected caller does not
+// leave a poll loop running to the deadline.
+func (m *ProfileManager) GpuProfile(ctx context.Context, pid int, numIterations int) (bool, string, error) {
 	if err := validatePID(pid); err != nil {
 		return false, err.Error(), nil
 	}
@@ -583,12 +588,13 @@ func (m *ProfileManager) GpuProfile(pid int, numIterations int) (bool, string, e
 	// and renames it to <prefix>.json when the trace is complete, so the
 	// completion signal is the file appearing under the wildcard name.
 	pattern := strings.Replace(traceName, ".json", "*.json", 1)
-	return m.waitForTraceFile(pid, pattern)
+	return m.waitForTraceFile(ctx, pid, pattern)
 }
 
 // waitForTraceFile polls for the trace file until it appears, the timeout
-// expires, or the target process dies, mirroring _wait_for_trace_file.
-func (m *ProfileManager) waitForTraceFile(pid int, pattern string) (bool, string, error) {
+// expires, the target process dies, or ctx is cancelled, mirroring
+// _wait_for_trace_file.
+func (m *ProfileManager) waitForTraceFile(ctx context.Context, pid int, pattern string) (bool, string, error) {
 	deadline := time.Now().Add(time.Duration(gpuProfileTimeoutSeconds) * time.Second)
 	for {
 		matches, err := filepath.Glob(filepath.Join(m.profilesDir, pattern))
@@ -603,7 +609,13 @@ func (m *ProfileManager) waitForTraceFile(pid int, pattern string) (bool, string
 		if !time.Now().Before(deadline) {
 			return false, fmt.Sprintf(gpuProfilingTimedOutMessage, gpuProfileTimeoutSeconds), nil
 		}
-		time.Sleep(gpuProfileTraceWaitInterval)
+		timer := time.NewTimer(gpuProfileTraceWaitInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false, "", ctx.Err()
+		case <-timer.C:
+		}
 		if !gpuProfilingPIDAlive(pid) {
 			return false, fmt.Sprintf(gpuProfilingDeadProcessMessage, pid, m.ipAddress), nil
 		}

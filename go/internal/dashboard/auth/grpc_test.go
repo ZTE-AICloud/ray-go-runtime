@@ -65,6 +65,7 @@ func TestGRPCUnaryInterceptor(t *testing.T) {
 		{name: "missing header rejected", authMode: "token", token: "secret", withMeta: true, wantCalled: false, wantCode: codes.Unauthenticated},
 		{name: "wrong token rejected", authMode: "token", token: "secret", withMeta: true, header: "Bearer nope", wantCalled: false, wantCode: codes.Unauthenticated},
 		{name: "non-bearer header rejected", authMode: "token", token: "secret", withMeta: true, header: "secret", wantCalled: false, wantCode: codes.Unauthenticated},
+		{name: "k8s mode is a no-op", authMode: "k8s", token: "secret", withMeta: true, header: "Bearer secret", wantCalled: true},
 	}
 
 	for _, tc := range tests {
@@ -138,12 +139,13 @@ func TestGRPCStreamInterceptor(t *testing.T) {
 	}
 }
 
-func TestGRPCInterceptorRoutesK8sModeToTheValidator(t *testing.T) {
-	// In k8s mode ValidateRequestToken delegates to k8sTokenValidator, which
-	// cannot initialize without the Kubernetes service environment. Presenting
-	// the same header that token mode would accept therefore proves the
-	// interceptor routed to the k8s validator rather than to the constant-time
-	// static comparison.
+func TestGRPCInterceptorIsANoOpInK8sMode(t *testing.T) {
+	// Enforcement is token-mode only, so k8s mode lets every request through.
+	// Enforcing here would reject the raylet's credential-free metrics and
+	// health-check calls: the C++ client attaches credentials only in TOKEN
+	// mode. A valid header that token mode would accept must therefore also
+	// pass in k8s mode, proving the interceptor did not route to the k8s
+	// validator.
 	t.Setenv("RAY_AUTH_MODE", "k8s")
 	t.Setenv("RAY_AUTH_TOKEN", "secret")
 	t.Setenv("KUBERNETES_SERVICE_HOST", "")
@@ -155,12 +157,15 @@ func TestGRPCInterceptorRoutesK8sModeToTheValidator(t *testing.T) {
 		return "ok", nil
 	}
 
-	_, err := GRPCUnaryServerInterceptor(incomingContext(true, "Bearer secret"), nil, &grpc.UnaryServerInfo{}, handler)
-	if got := status.Code(err); got != codes.Unauthenticated {
-		t.Fatalf("code = %v, want Unauthenticated", got)
+	resp, err := GRPCUnaryServerInterceptor(incomingContext(true, "Bearer secret"), nil, &grpc.UnaryServerInfo{}, handler)
+	if err != nil {
+		t.Fatalf("k8s mode: err = %v, want nil (enforcement is token-mode only)", err)
 	}
-	if called {
-		t.Fatal("handler ran; the interceptor used the static token instead of the k8s validator")
+	if !called {
+		t.Fatal("handler did not run in k8s mode; k8s mode must be a no-op")
+	}
+	if resp != "ok" {
+		t.Fatalf("resp = %v, want \"ok\"", resp)
 	}
 }
 

@@ -2,6 +2,7 @@ package reporter
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/ray-project/ray/go/internal/dashboard/agent"
@@ -107,12 +108,17 @@ func (s *ReporterService) CpuProfiling(_ context.Context, req *proto.CpuProfilin
 // GpuProfiling runs a dynolog gputrace against the requested pid and returns
 // the trace path relative to the log directory, mirroring the Python reporter
 // agent's gpu_profile handler.
-func (s *ReporterService) GpuProfiling(_ context.Context, req *proto.GpuProfilingRequest) (*proto.GpuProfilingReply, error) {
+func (s *ReporterService) GpuProfiling(ctx context.Context, req *proto.GpuProfilingRequest) (*proto.GpuProfilingReply, error) {
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "request must not be nil")
 	}
-	success, output, err := s.profileManager.GpuProfile(int(req.GetPid()), int(req.GetNumIterations()))
+	success, output, err := s.profileManager.GpuProfile(ctx, int(req.GetPid()), int(req.GetNumIterations()))
 	if err != nil {
+		// A cancelled request context means the caller is gone, so the reply can
+		// never be delivered; report the cancellation instead of a timeout.
+		if errors.Is(err, context.Canceled) {
+			return nil, status.Error(codes.Canceled, ctx.Err().Error())
+		}
 		// Python raises RuntimeError here, which the RPC surfaces as an error
 		// rather than a reply with success=false.
 		return nil, status.Error(codes.Unknown, err.Error())
