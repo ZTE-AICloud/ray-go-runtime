@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,6 +20,9 @@ import (
 	"github.com/ray-project/ray/go/internal/dashboard/agent"
 	"github.com/ray-project/ray/go/proto"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 // unusedPID returns a pid with no /proc entry, so inspecting it models a
@@ -282,6 +286,47 @@ func startStubRaylet(t *testing.T, stub *stubNodeManager) int {
 		t.Fatalf("parse port %q: %v", port, err)
 	}
 	return parsed
+}
+
+// requireBearer rejects requests whose authorization metadata does not carry
+// the expected bearer token, which is how a token-enforcing raylet server
+// answers under RAY_AUTH_MODE=token (src/ray/ray/common/server_call.h
+// enforcement, and the Bearer format from go/pkg/gcs/dial.go).
+func requireBearer(expected string) grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req interface{}, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		md, _ := metadata.FromIncomingContext(ctx)
+		if vals := md.Get("authorization"); len(vals) == 0 || vals[0] != expected {
+			return nil, status.Error(codes.Unauthenticated, "Invalid or missing authentication token")
+		}
+		return handler(ctx, req)
+	}
+}
+
+// TestRayletWorkerPIDFetcherPresentsTheClusterToken proves the fetcher dials
+// with the cluster's credentials: under token mode the raylet rejects bare
+// connections, so without the fix the fetcher degrades to an empty worker list
+// on every collection cycle.
+func TestRayletWorkerPIDFetcherPresentsTheClusterToken(t *testing.T) {
+	t.Setenv("RAY_AUTH_MODE", "token")
+	t.Setenv("RAY_AUTH_TOKEN", "secret")
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := grpc.NewServer(grpc.ChainUnaryInterceptor(requireBearer("Bearer secret")))
+	proto.RegisterNodeManagerServiceServer(srv, &stubNodeManager{pids: []int32{7, 8}})
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+
+	fetcher := newRayletWorkerPIDFetcher("127.0.0.1", lis.Addr().(*net.TCPAddr).Port)
+	pids, err := fetcher()
+	if err != nil {
+		t.Fatalf("fetcher with token mode on: %v", err)
+	}
+	if !reflect.DeepEqual(pids, []int32{7, 8}) {
+		t.Fatalf("pids = %v, want [7 8]", pids)
+	}
 }
 
 // TestCollectorWorkersOverRayletGRPC verifies the whole discovery path against a
