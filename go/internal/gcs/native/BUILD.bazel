@@ -65,6 +65,7 @@ go_test(
     importpath = "github.com/ray-project/ray/go/internal/gcs/native",
     deps = [
         "//go/pkg/gcs",
+        "//go/pkg/ids",
     ],
 )
 

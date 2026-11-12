@@ -89,16 +89,16 @@ TEST(GcsClientPublisherTest, PublishErrorNullBackingClient) {
 
   char *error = nullptr;
 
-  int result = ray_gcs_client_publisher_publish_error(
-      &client,                             // client (null backing client)
-      "00000000000000000000000000000000",  // key_id
-      nullptr,                             // job_id_bytes
-      0,                                   // job_id_len
-      "raylet_died",                       // error_type
-      "message",                           // error_message
-      0.0,                                 // timestamp
-      5000,                                // timeout_ms
-      &error);
+  int result =
+      ray_gcs_client_publisher_publish_error(&client,     // client (null backing client)
+                                             "ffffffff",  // key_id
+                                             nullptr,     // job_id_bytes
+                                             0,           // job_id_len
+                                             "raylet_died",  // error_type
+                                             "message",      // error_message
+                                             0.0,            // timestamp
+                                             5000,           // timeout_ms
+                                             &error);
 
   ASSERT_EQ(result, 0);
   ASSERT_NE(error, nullptr);

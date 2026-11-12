@@ -173,15 +173,8 @@ TEST(GcsClientBridgeTest, AutoscalerGetStatusSignature) {
 TEST(GcsClientBridgeTest, PublisherPublishErrorSignature) {
   char *error = nullptr;
 
-  int result = ray_gcs_client_publisher_publish_error(nullptr,
-                                                      "00000000000000000000000000000000",
-                                                      nullptr,
-                                                      0,
-                                                      "raylet_died",
-                                                      "message",
-                                                      0.0,
-                                                      5000,
-                                                      &error);
+  int result = ray_gcs_client_publisher_publish_error(
+      nullptr, "ffffffff", nullptr, 0, "raylet_died", "message", 0.0, 5000, &error);
   ASSERT_EQ(result, 0);
   ASSERT_NE(error, nullptr);
   ASSERT_NE(std::strstr(error, "client is null"), nullptr)
@@ -190,15 +183,8 @@ TEST(GcsClientBridgeTest, PublisherPublishErrorSignature) {
   ray_gcs_free_memory(error);
 
   // A null error_out must not crash either; set_error guards it.
-  result = ray_gcs_client_publisher_publish_error(nullptr,
-                                                  "00000000000000000000000000000000",
-                                                  nullptr,
-                                                  0,
-                                                  "raylet_died",
-                                                  "message",
-                                                  0.0,
-                                                  5000,
-                                                  nullptr);
+  result = ray_gcs_client_publisher_publish_error(
+      nullptr, "ffffffff", nullptr, 0, "raylet_died", "message", 0.0, 5000, nullptr);
   ASSERT_EQ(result, 0);
 
   SUCCEED() << "Publisher publish_error signature verified";

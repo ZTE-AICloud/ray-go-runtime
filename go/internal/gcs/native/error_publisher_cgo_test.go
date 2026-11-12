@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/ray-project/ray/go/pkg/gcs"
+	"github.com/ray-project/ray/go/pkg/ids"
 )
 
 func TestCgoClient_PublishErrorInfo_NilReceiver(t *testing.T) {
@@ -42,7 +43,7 @@ func TestCgoClient_PublishErrorInfo_NullBackingClient(t *testing.T) {
 	// C++ tests cover). No live GCS cluster is needed.
 	pub := &cgoClient{}
 	err := pub.PublishErrorInfo(context.Background(), "00000000000000000000000000000000",
-		gcs.ErrorInfoPayload{JobID: make([]byte, 16), Type: "raylet_died", Message: "message"})
+		gcs.ErrorInfoPayload{JobID: ids.NilJobID().Binary(), Type: "raylet_died", Message: "message"})
 	if err == nil {
 		t.Fatal("expected error from null backing client, got nil")
 	}
