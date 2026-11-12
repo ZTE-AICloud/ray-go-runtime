@@ -36,14 +36,18 @@ func TestCgoClient_PublishErrorInfo_NilReceiver(t *testing.T) {
 }
 
 func TestCgoClient_PublishErrorInfo_NullBackingClient(t *testing.T) {
-	// A *cgoClient with a nil backing C client reaches the C++ boundary,
-	// which rejects the null client and reports an error. This exercises the
-	// fail path of publish across the cgo bridge without a live GCS cluster.
+	// A *cgoClient with a nil backing C client is rejected by withPtr's
+	// closed-client guard before cgo is entered, so this pins the Go-side
+	// fail path of publish rather than the C++ argument guard (which the
+	// C++ tests cover). No live GCS cluster is needed.
 	pub := &cgoClient{}
 	err := pub.PublishErrorInfo(context.Background(), "00000000000000000000000000000000",
 		gcs.ErrorInfoPayload{JobID: make([]byte, 16), Type: "raylet_died", Message: "message"})
 	if err == nil {
 		t.Fatal("expected error from null backing client, got nil")
+	}
+	if !strings.Contains(err.Error(), "closed") {
+		t.Errorf("expected 'closed' in error, got %q", err)
 	}
 	t.Logf("publish against null backing client failed as expected: %v", err)
 }

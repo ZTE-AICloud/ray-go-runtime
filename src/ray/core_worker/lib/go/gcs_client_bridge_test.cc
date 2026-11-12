@@ -184,6 +184,8 @@ TEST(GcsClientBridgeTest, PublisherPublishErrorSignature) {
                                                       &error);
   ASSERT_EQ(result, 0);
   ASSERT_NE(error, nullptr);
+  ASSERT_NE(std::strstr(error, "client is null"), nullptr)
+      << "expected null-client error, got: " << error;
   std::cout << "Expected error for null client: " << error << std::endl;
   ray_gcs_free_memory(error);
 

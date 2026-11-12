@@ -128,8 +128,10 @@ type NodeResourceUsagePublisher interface {
 // ErrorInfoPayload carries one error published to drivers on
 // RAY_ERROR_INFO_CHANNEL, matching rpc::ErrorTableData.
 type ErrorInfoPayload struct {
-	// JobID is the binary job id the error is attributed to. The nil job id
-	// broadcasts the error to every attached driver.
+	// JobID is the binary job id the error is attributed to. Pass
+	// ids.NilJobID().Binary() (16 zero bytes) to broadcast the error to every
+	// attached driver, matching the Python agent's publish_error; a nil slice
+	// leaves the proto field unset instead of stamping those bytes.
 	JobID   []byte
 	Type    string
 	Message string
