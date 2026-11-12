@@ -25,6 +25,7 @@ import "C"
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 	"unsafe"
 
@@ -34,6 +35,17 @@ import (
 // Compile-time assertion: *cgoClient satisfies the pkg-level
 // gcs.ErrorInfoPublisher interface.
 var _ gcs.ErrorInfoPublisher = (*cgoClient)(nil)
+
+// scrubNUL removes embedded NUL bytes. The bridge hands error_type and
+// error_message to the C++ protobuf setters as NUL-terminated strings, so a
+// NUL byte from the raw raylet.out tail — plausible exactly in the hard-crash
+// scenarios this diagnostic targets — would silently truncate the published
+// message mid-content. Removing the bytes keeps the whole tail readable. The
+// binary-safe job id needs no such handling because it crosses the boundary
+// with an explicit length.
+func scrubNUL(s string) string {
+	return strings.ReplaceAll(s, "\x00", "")
+}
 
 // PublishErrorInfo publishes one error info message through the native GCS
 // client bridge, mirroring the Python agent's GcsClient.publish_error: the
@@ -59,7 +71,7 @@ func (c *cgoClient) PublishErrorInfo(ctx context.Context, keyID string, payload 
 	defer C.free(unsafe.Pointer(cKeyID))
 	cType := C.CString(payload.Type)
 	defer C.free(unsafe.Pointer(cType))
-	cMessage := C.CString(payload.Message)
+	cMessage := C.CString(scrubNUL(payload.Message))
 	defer C.free(unsafe.Pointer(cMessage))
 
 	var jobIDPtr *C.char

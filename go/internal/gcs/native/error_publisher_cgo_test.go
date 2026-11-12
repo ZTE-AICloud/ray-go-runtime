@@ -52,3 +52,24 @@ func TestCgoClient_PublishErrorInfo_NullBackingClient(t *testing.T) {
 	}
 	t.Logf("publish against null backing client failed as expected: %v", err)
 }
+
+// TestScrubNULRemovesEmbeddedNULBytes pins the NUL scrub the message goes
+// through before C.CString: the C++ protobuf setters read it as a
+// NUL-terminated string, so an unsanitized NUL from raw raylet.out tail bytes
+// would silently truncate the published diagnostic mid-content. Reverting the
+// scrub to an identity function fails this test.
+func TestScrubNULRemovesEmbeddedNULBytes(t *testing.T) {
+	const embedded = "before\x00after\n    last tail line"
+	got := scrubNUL(embedded)
+	if want := "beforeafter\n    last tail line"; got != want {
+		t.Fatalf("scrubNUL = %q, want %q", got, want)
+	}
+	if strings.ContainsRune(scrubNUL("\x00tail\x00"), '\x00') {
+		t.Fatal("scrubNUL left an embedded NUL byte behind")
+	}
+	// A clean message must pass through unchanged: the scrub must not be a
+	// disguised message rewrite.
+	if got := scrubNUL("Raylet is terminated. Termination is unexpected."); got != "Raylet is terminated. Termination is unexpected." {
+		t.Fatalf("scrubNUL changed a clean message: %q", got)
+	}
+}
