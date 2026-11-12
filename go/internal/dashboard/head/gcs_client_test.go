@@ -617,4 +617,15 @@ func TestNewNodeManagerClientPresentsTheClusterToken(t *testing.T) {
 	if err := fetch(); err != nil {
 		t.Fatalf("NewNodeManagerClient after the token rotated: %v", err)
 	}
+
+	// A wrong token must be rejected — this guards against an interceptor
+	// that accepts anything.
+	wrong := "Bearer expected-but-not-presented"
+	expected.Store(&wrong)
+	t.Setenv("RAY_AUTH_TOKEN", "other")
+	if err := fetch(); err == nil {
+		t.Fatal("NewNodeManagerClient succeeded with a wrong token; the test server's guard is not actually checking")
+	} else if got := status.Code(err); got != codes.Unauthenticated {
+		t.Fatalf("NewNodeManagerClient with a wrong token failed with %v, want %v", got, codes.Unauthenticated)
+	}
 }
