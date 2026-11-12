@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "agent.go",
         "consts.go",
+        "error_publisher.go",
         "grpc_server.go",
         "http_server.go",
         "parent_watcher.go",
