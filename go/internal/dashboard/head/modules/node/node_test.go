@@ -1432,3 +1432,67 @@ func TestNodeHeadFetchClusterStatusPresentsTheClusterToken(t *testing.T) {
 		t.Fatal("fetchClusterStatus succeeded with a wrong token; the test server's guard is not actually checking")
 	}
 }
+
+// stubNodeManagerStats answers GetNodeStats with a fixed worker count so a
+// token-guarded node manager client has a call to make.
+type stubNodeManagerStats struct {
+	proto.UnimplementedNodeManagerServiceServer
+}
+
+func (*stubNodeManagerStats) GetNodeStats(context.Context, *proto.GetNodeStatsRequest) (*proto.GetNodeStatsReply, error) {
+	return &proto.GetNodeStatsReply{NumWorkers: 3}, nil
+}
+
+// TestFetchNodeStatsPresentsTheClusterToken proves the per-node stats dial
+// authenticates: under token mode a bare dial gets Unauthenticated, so worker
+// stats would silently disappear from the node detail. Rotating the token
+// between two calls pins the per-dial resolution.
+func TestFetchNodeStatsPresentsTheClusterToken(t *testing.T) {
+	t.Setenv("RAY_USE_TLS", "0")
+	t.Setenv("RAY_AUTH_MODE", "token")
+	t.Setenv("RAY_AUTH_TOKEN", "secret")
+
+	secret := "Bearer secret"
+	var expected atomic.Pointer[string]
+	expected.Store(&secret)
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := grpc.NewServer(grpc.ChainUnaryInterceptor(requireBearer(&expected)))
+	proto.RegisterNodeManagerServiceServer(srv, &stubNodeManagerStats{})
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+
+	// A bounded context makes an unreachable raylet fail the test with a
+	// message instead of hanging until the bazel test timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	nodeInfo := &proto.GcsNodeInfo{
+		NodeManagerAddress: "127.0.0.1",
+		NodeManagerPort:    int32(lis.Addr().(*net.TCPAddr).Port),
+	}
+
+	reply, err := fetchNodeStats(ctx, nodeInfo)
+	if err != nil {
+		t.Fatalf("fetchNodeStats with token mode on: %v", err)
+	}
+	if got := reply.GetNumWorkers(); got != 3 {
+		t.Fatalf("GetNodeStats num workers = %d, want 3", got)
+	}
+
+	// A rotated projected token must be picked up by the next dial.
+	t.Setenv("RAY_AUTH_TOKEN", "rotated")
+	rotated := "Bearer rotated"
+	expected.Store(&rotated)
+
+	reply, err = fetchNodeStats(ctx, nodeInfo)
+	if err != nil {
+		t.Fatalf("fetchNodeStats after the token rotated: %v", err)
+	}
+	if got := reply.GetNumWorkers(); got != 3 {
+		t.Fatalf("GetNodeStats num workers after the token rotated = %d, want 3", got)
+	}
+}
