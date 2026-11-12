@@ -28,6 +28,7 @@ import (
 
 	"github.com/ray-project/ray/go/internal/dashboard/head"
 	"github.com/ray-project/ray/go/pkg/gcs"
+	"github.com/ray-project/ray/go/pkg/log"
 	"github.com/ray-project/ray/go/proto"
 	"google.golang.org/protobuf/encoding/protojson"
 )
@@ -915,6 +916,7 @@ func (n *NodeHead) fetchClusterStatus(ctx context.Context) *proto.GetClusterStat
 	}
 	dialOpts, err := gcs.DialOptionsFromEnv()
 	if err != nil {
+		log.Log.Error(err, "failed to resolve GCS dial options", "address", n.cfg.GCSAddress)
 		return nil
 	}
 	// The head dials GCS over plain TCP: grpc-go's default dialer stalls the

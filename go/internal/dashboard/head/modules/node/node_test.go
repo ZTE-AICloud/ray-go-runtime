@@ -1363,7 +1363,7 @@ type stubAutoscaler struct {
 	proto.UnimplementedAutoscalerStateServiceServer
 }
 
-func (stubAutoscaler) GetClusterStatus(context.Context, *proto.GetClusterStatusRequest) (*proto.GetClusterStatusReply, error) {
+func (*stubAutoscaler) GetClusterStatus(context.Context, *proto.GetClusterStatusRequest) (*proto.GetClusterStatusReply, error) {
 	return &proto.GetClusterStatusReply{}, nil
 }
 
@@ -1406,8 +1406,13 @@ func TestNodeHeadFetchClusterStatusPresentsTheClusterToken(t *testing.T) {
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 
+	// A bounded context makes an unreachable server fail the test with a
+	// message instead of hanging until the bazel test timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	n := &NodeHead{cfg: &head.HeadConfig{GCSAddress: lis.Addr().String()}}
-	if reply := n.fetchClusterStatus(context.Background()); reply == nil {
+	if reply := n.fetchClusterStatus(ctx); reply == nil {
 		t.Fatal("fetchClusterStatus returned nil with the right token: the dial did not authenticate")
 	}
 
@@ -1416,14 +1421,14 @@ func TestNodeHeadFetchClusterStatusPresentsTheClusterToken(t *testing.T) {
 	rotated := "Bearer rotated"
 	expected.Store(&rotated)
 
-	if reply := n.fetchClusterStatus(context.Background()); reply == nil {
+	if reply := n.fetchClusterStatus(ctx); reply == nil {
 		t.Fatal("fetchClusterStatus returned nil after the token rotated: the dial did not re-resolve the token")
 	}
 
 	// A wrong token must be rejected — this guards against an interceptor
 	// that accepts anything.
 	t.Setenv("RAY_AUTH_TOKEN", "other")
-	if reply := n.fetchClusterStatus(context.Background()); reply != nil {
+	if reply := n.fetchClusterStatus(ctx); reply != nil {
 		t.Fatal("fetchClusterStatus succeeded with a wrong token; the test server's guard is not actually checking")
 	}
 }

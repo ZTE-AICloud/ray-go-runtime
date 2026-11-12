@@ -24,6 +24,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ray-project/ray/go/internal/dashboard/head"
 	"github.com/ray-project/ray/go/proto"
@@ -349,7 +350,7 @@ type stubAutoscaler struct {
 	proto.UnimplementedAutoscalerStateServiceServer
 }
 
-func (stubAutoscaler) GetClusterStatus(context.Context, *proto.GetClusterStatusRequest) (*proto.GetClusterStatusReply, error) {
+func (*stubAutoscaler) GetClusterStatus(context.Context, *proto.GetClusterStatusRequest) (*proto.GetClusterStatusReply, error) {
 	return &proto.GetClusterStatusReply{}, nil
 }
 
@@ -393,8 +394,13 @@ func TestFetchClusterStatusPresentsTheClusterToken(t *testing.T) {
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 
+	// A bounded context makes an unreachable server fail the test with a
+	// message instead of hanging until the bazel test timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	r := &ReportHead{}
-	if reply := r.fetchClusterStatusV2(context.Background(), lis.Addr().String()); reply == nil {
+	if reply := r.fetchClusterStatusV2(ctx, lis.Addr().String()); reply == nil {
 		t.Fatal("fetchClusterStatusV2 returned nil with token credentials on: the dial did not authenticate")
 	}
 
@@ -403,7 +409,7 @@ func TestFetchClusterStatusPresentsTheClusterToken(t *testing.T) {
 	rotated := "Bearer rotated"
 	expected.Store(&rotated)
 
-	if reply := r.fetchClusterStatusV2(context.Background(), lis.Addr().String()); reply == nil {
+	if reply := r.fetchClusterStatusV2(ctx, lis.Addr().String()); reply == nil {
 		t.Fatal("fetchClusterStatusV2 returned nil after the token rotated: the dial did not re-resolve the token")
 	}
 }
