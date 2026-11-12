@@ -145,10 +145,11 @@ type ErrorInfoPublisher interface {
 	// the C++ PublisherAccessor::PublishError wire format. The implementation
 	// stamps the timestamp and derives the RPC timeout from ctx.
 	//
-	// ctx MUST carry a deadline. Without one the underlying RPC runs without
-	// a timeout and is retried indefinitely while GCS is unreachable, and the
-	// synchronous cgo call cannot observe ctx cancellation, so the caller
-	// blocks until GCS answers. The agent's watcher passes 60s, mirroring
-	// Python's publish_error_to_driver timeout.
+	// ctx MUST carry a deadline, and implementations reject the call without
+	// one: the underlying RPC would run without a timeout and be retried
+	// indefinitely while GCS is unreachable, and the synchronous cgo call
+	// cannot observe ctx cancellation, so the caller would block until GCS
+	// answers. The agent's watcher passes 60s, mirroring Python's
+	// publish_error_to_driver timeout.
 	PublishErrorInfo(ctx context.Context, keyID string, payload ErrorInfoPayload) error
 }

@@ -20,6 +20,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ray-project/ray/go/pkg/gcs"
 	"github.com/ray-project/ray/go/pkg/ids"
@@ -40,9 +41,12 @@ func TestCgoClient_PublishErrorInfo_NullBackingClient(t *testing.T) {
 	// A *cgoClient with a nil backing C client is rejected by withPtr's
 	// closed-client guard before cgo is entered, so this pins the Go-side
 	// fail path of publish rather than the C++ argument guard (which the
-	// C++ tests cover). No live GCS cluster is needed.
+	// C++ tests cover). No live GCS cluster is needed. The ctx carries a
+	// deadline because the deadline-less rejection fires before withPtr.
 	pub := &cgoClient{}
-	err := pub.PublishErrorInfo(context.Background(), ids.NilJobID().Hex(),
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := pub.PublishErrorInfo(ctx, ids.NilJobID().Hex(),
 		gcs.ErrorInfoPayload{JobID: ids.NilJobID().Binary(), Type: "raylet_died", Message: "message"})
 	if err == nil {
 		t.Fatal("expected error from null backing client, got nil")
@@ -51,6 +55,24 @@ func TestCgoClient_PublishErrorInfo_NullBackingClient(t *testing.T) {
 		t.Errorf("expected 'closed' in error, got %q", err)
 	}
 	t.Logf("publish against null backing client failed as expected: %v", err)
+}
+
+// TestCgoClient_PublishErrorInfo_RejectsADeadlineLessContext enforces the
+// interface contract: a deadline-less ctx maps to timeout -1, which the C++
+// retry queue waits on unboundedly while GCS is unreachable, and this
+// synchronous cgo call cannot observe ctx cancellation. Deleting the
+// deadline check in PublishErrorInfo fails this test — the violation surfaces
+// as an immediate error instead of an unabortable hang.
+func TestCgoClient_PublishErrorInfo_RejectsADeadlineLessContext(t *testing.T) {
+	pub := &cgoClient{}
+	err := pub.PublishErrorInfo(context.Background(), ids.NilJobID().Hex(),
+		gcs.ErrorInfoPayload{JobID: ids.NilJobID().Binary(), Type: "raylet_died", Message: "message"})
+	if err == nil {
+		t.Fatal("PublishErrorInfo accepted a deadline-less context; the synchronous cgo call would hang unabortably while GCS is unreachable")
+	}
+	if !strings.Contains(err.Error(), "deadline") {
+		t.Errorf("error %q does not name the missing deadline", err)
+	}
 }
 
 // TestScrubNULRemovesEmbeddedNULBytes pins the NUL scrub the message goes
