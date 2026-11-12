@@ -38,7 +38,9 @@ var _ gcs.ErrorInfoPublisher = (*cgoClient)(nil)
 // PublishErrorInfo publishes one error info message through the native GCS
 // client bridge, mirroring the Python agent's GcsClient.publish_error: the
 // wrapper stamps the timestamp and the RPC timeout comes from the context
-// deadline.
+// deadline. A deadline-less ctx passes timeout_ms = -1, which the C++ retry
+// queue maps to an unbounded wait, and this synchronous cgo call cannot
+// observe ctx cancellation — callers must pass a bounded ctx.
 func (c *cgoClient) PublishErrorInfo(ctx context.Context, keyID string, payload gcs.ErrorInfoPayload) error {
 	if c == nil {
 		return fmt.Errorf("gcs client is not initialized")
