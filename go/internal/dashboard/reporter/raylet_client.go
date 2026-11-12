@@ -28,8 +28,9 @@ type workerPIDFetcher func() ([]int32, error)
 //
 // Every dial presents the cluster's credentials resolved from the environment,
 // as the C++ BuildChannel does: under RAY_AUTH_MODE=token the raylet rejects
-// unauthenticated connections, so a bare dial would degrade the worker list to
-// empty on every collection cycle.
+// unauthenticated requests (src/ray/rpc/server_call.h token enforcement, Bearer
+// header format from src/ray/rpc/authentication/authentication_token.h), so a
+// bare dial would degrade the worker list to empty on every collection cycle.
 //
 // A dial failure, an RPC failure or a timeout is logged and returned as an
 // error; the caller degrades the worker list to empty rather than failing the
