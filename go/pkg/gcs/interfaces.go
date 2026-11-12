@@ -124,3 +124,22 @@ type NodeResourceUsagePublisher interface {
 	// payload. It returns an error if the publication fails.
 	PublishNodeResourceUsage(ctx context.Context, keyID, jsonPayload string) error
 }
+
+// ErrorInfoPayload carries one error published to drivers on
+// RAY_ERROR_INFO_CHANNEL, matching rpc::ErrorTableData.
+type ErrorInfoPayload struct {
+	// JobID is the binary job id the error is attributed to. The nil job id
+	// broadcasts the error to every attached driver.
+	JobID   []byte
+	Type    string
+	Message string
+}
+
+// ErrorInfoPublisher publishes error info messages to GCS. Implemented by the
+// cgo native layer inside go_runtime.so; the thin layer holds this interface.
+type ErrorInfoPublisher interface {
+	// PublishErrorInfo publishes one error info message under keyID, matching
+	// the C++ PublisherAccessor::PublishError wire format. The implementation
+	// stamps the timestamp and derives the RPC timeout from ctx.
+	PublishErrorInfo(ctx context.Context, keyID string, payload ErrorInfoPayload) error
+}
