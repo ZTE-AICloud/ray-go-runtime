@@ -352,9 +352,17 @@ func TestReportRayletDeathSwallowsPublishFailures(t *testing.T) {
 	pub := &stubErrorPublisher{err: errors.New("gcs is gone")}
 
 	reportRayletDeath(dir, pub) // must not panic
+	if _, payloads := pub.recorded(); len(payloads) != 1 {
+		t.Fatalf("publish attempts = %d, want 1: a failed publish must be retried-shaped (attempted then swallowed), not skipped", len(payloads))
+	}
 }
 
 func TestPublishRayletDiedErrorToleratesANilPublisher(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("publishRayletDiedError panicked on a nil publisher: %v", r)
+		}
+	}()
 	publishRayletDiedError(nil, "Raylet is terminated. Termination is unexpected.")
 }
 
@@ -365,11 +373,22 @@ func TestReportRayletDeathToleratesAMissingLog(t *testing.T) {
 	}
 	// The read-failure publish is asserted by
 	// TestReportRayletDeathPublishesTheReadFailure; here a nil publisher must
-	// keep both the missing-file and the empty-log-dir paths quiet no-ops.
-	// An empty log dir collapses filepath.Join to a bare "raylet.out", so it
-	// is the same read failure — Python has no special case for it either.
+	// keep the missing-file path a quiet no-op.
 	reportRayletDeath(dir, nil)
-	reportRayletDeath("", nil)
+	// An empty log dir collapses filepath.Join to a bare "raylet.out", so it is
+	// the same read failure and must publish the bare-path message. This pins
+	// the absence of the old `if logDir == ""` special case: reintroducing it
+	// would report a different message and be caught here.
+	pub := &stubErrorPublisher{}
+	reportRayletDeath("", pub)
+	_, payloads := pub.recorded()
+	if len(payloads) != 1 {
+		t.Fatalf("empty log dir published %d error messages, want exactly 1: an empty dir is the bare raylet.out read failure", len(payloads))
+	}
+	const want = "Raylet is terminated. Failed to read Raylet logs at raylet.out: "
+	if !strings.HasPrefix(payloads[0].Message, want) {
+		t.Errorf("empty log dir message = %q, want the bare raylet.out read-failure prefix %q", payloads[0].Message, want)
+	}
 }
 
 // TestReportRayletDeathReadsOnlyTheTailWindow proves a log larger than the
