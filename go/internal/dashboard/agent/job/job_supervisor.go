@@ -89,14 +89,25 @@ func createSupervisorActor(opts supervisorCreateOptions, constructorArgs ...inte
 	return &supervisorActor{handle: handle}, nil
 }
 
-// buildActorResources merges the entrypoint resource requests of a job into an
-// actor resource map. Zero and negative quantities are dropped so the actor
-// falls back to the scheduler defaults.
+// buildActorResources builds the resource map the JobSupervisor actor requests.
+// The entrypoint's GPU, memory and custom resource requests are added on top of
+// the CPU request.
+//
+// The CPU key is always present, including at zero. An empty map reaches the
+// C++ actor bridge empty, and the bridge then applies its default actor CPU of
+// 1; an actor holds its creation resources for its whole lifetime on the node
+// it is placed on. The job supervisor is pinned to the head node, so that
+// unrequested reservation blocks every later job on a head configured with a
+// single CPU. The reference Python implementation passes num_cpus=0 explicitly
+// for the same reason, which also selects the specified-resources branch and
+// charges no CPU per method call.
 func buildActorResources(numCPUs, numGPUs float64, memory int64, resources map[string]float64) map[string]float64 {
-	out := map[string]float64{}
-	if numCPUs > 0 {
-		out["CPU"] = numCPUs
+	// A negative request cannot be satisfied; clamp it to the documented
+	// default of zero rather than forwarding it to the scheduler.
+	if numCPUs < 0 {
+		numCPUs = 0
 	}
+	out := map[string]float64{"CPU": numCPUs}
 	if numGPUs > 0 {
 		out["GPU"] = numGPUs
 	}
