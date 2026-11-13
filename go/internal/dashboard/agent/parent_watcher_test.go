@@ -279,6 +279,41 @@ func TestParentWatcherPipeModeDoesNotPollTheParentPid(t *testing.T) {
 	}
 }
 
+// TestWatchParentPipeReturnsWhenTheContextIsCancelled pins the watcher's second
+// way out: a context cancelled for an unrelated reason must end it without any
+// death being reported. The pipe stays open, so nothing but the cancellation can
+// end the wait, and the watcher is driven directly because its return is the
+// behavior under test — a never-closed pipe leaves no other observable.
+func TestWatchParentPipeReturnsWhenTheContextIsCancelled(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer func() { _ = r.Close() }()
+	defer func() { _ = w.Close() }()
+
+	pub := &stubErrorPublisher{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		watchParentPipe(ctx, cancel, t.TempDir(), pub, r)
+		close(done)
+	}()
+
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watchParentPipe did not return after the context was cancelled")
+	}
+	if _, payloads := pub.recorded(); len(payloads) != 0 {
+		t.Fatalf("published %d diagnostics on a bare cancellation, want 0", len(payloads))
+	}
+}
+
 // failingReader fails every read, standing in for a stdin that is not the
 // parent-lifetime pipe.
 type failingReader struct{ err error }

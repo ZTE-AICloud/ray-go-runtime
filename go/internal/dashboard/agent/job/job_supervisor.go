@@ -89,9 +89,12 @@ func createSupervisorActor(opts supervisorCreateOptions, constructorArgs ...inte
 	return &supervisorActor{handle: handle}, nil
 }
 
-// buildActorResources builds the resource map the JobSupervisor actor requests.
-// The entrypoint's GPU, memory and custom resource requests are added on top of
-// the CPU request.
+// buildActorResources builds the resource map the JobSupervisor actor requests:
+// the CPU request, plus the entrypoint's GPU, memory and custom resource
+// requests when they are positive. A custom entrypoint resource named CPU, GPU
+// or memory is merged last and therefore wins over the dedicated field, which
+// is the pre-existing behaviour; the reference implementation rejects those
+// names instead.
 //
 // The CPU key is always present, including at zero. An empty map reaches the
 // C++ actor bridge empty, and the bridge then applies its default actor CPU of

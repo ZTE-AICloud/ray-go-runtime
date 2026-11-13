@@ -79,11 +79,12 @@ var parentPidFn = os.Getppid
 var stdinReader io.Reader = os.Stdin
 
 // StartParentWatcher monitors the raylet that spawned this agent and
-// fate-shares with it: after parentDeathThreshold consecutive polls in which
-// this process's parent is not the raylet, it records a raylet death
-// diagnostic, publishes RAYLET_DIED_ERROR to every attached driver, and
-// cancels ctx so the agent shuts down. It mirrors Python's
-// create_check_raylet_task on the pid-polling path.
+// fate-shares with it: once it has proof of the raylet's death it records a
+// diagnostic, publishes RAYLET_DIED_ERROR to every attached driver, and cancels
+// ctx so the agent shuts down. Proof is a zero-byte read on the parent-lifetime
+// pipe when the raylet provides one, and parentDeathThreshold consecutive polls
+// in which this process's parent is not the raylet otherwise. It mirrors
+// Python's create_check_raylet_task.
 //
 // When RAY_RAYLET_PID is unset or invalid the watcher does nothing: an agent
 // started outside a raylet must not shut itself down.
