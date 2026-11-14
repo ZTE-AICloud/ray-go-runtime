@@ -642,6 +642,24 @@ TEST(TaskSubmitterOperationsBuildActorOptionsTest, ExplicitZeroCPU) {
   EXPECT_EQ(placement_it->second, 0.0);
 }
 
+// TestTaskSubmitterOperationsBuildActorOptionsTest_EmptyResourcesMatchTheDefaultActorCase
+// verifies the empty-map default mirrors the reference's default actor case: the
+// actor creation charges no CPU for its lifetime, while placement still requires
+// one so the actor lands where it can run. Charging the CPU to both maps, as the
+// bridge did before, made every idle actor hold a CPU on its node forever.
+TEST(TaskSubmitterOperationsBuildActorOptionsTest,
+     EmptyResourcesMatchTheDefaultActorCase) {
+  ray::go::ActorCreateOptions options;
+
+  auto &ops = ray::go::TaskSubmitterOperations::GetInstance();
+  ray::core::ActorCreationOptions built = ops.BuildActorOptions(options);
+
+  ASSERT_EQ(built.resources.size(), 1u);
+  EXPECT_EQ(built.resources.at("CPU"), 0.0);
+  ASSERT_EQ(built.placement_resources.size(), 1u);
+  EXPECT_EQ(built.placement_resources.at("CPU"), 1.0);
+}
+
 // TestTaskSubmitterOperationsBuildActorOptionsTest_NodeAffinity verifies that a
 // node-affinity bound actor (head-node pinning for the job driver) produces a
 // node_affinity_scheduling_strategy in the built ActorCreationOptions.

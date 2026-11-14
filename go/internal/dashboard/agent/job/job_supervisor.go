@@ -96,14 +96,13 @@ func createSupervisorActor(opts supervisorCreateOptions, constructorArgs ...inte
 // is the pre-existing behaviour; the reference implementation rejects those
 // names instead.
 //
-// The CPU key is always present, including at zero. An empty map reaches the
-// C++ actor bridge empty, and the bridge then applies its default actor CPU of
-// 1; an actor holds its creation resources for its whole lifetime on the node
-// it is placed on. The job supervisor is pinned to the head node, so that
-// unrequested reservation blocks every later job on a head configured with a
-// single CPU. The reference Python implementation passes num_cpus=0 explicitly
-// for the same reason, which also selects the specified-resources branch and
-// charges no CPU per method call.
+// The CPU key is always present, including at zero. These are the job's own
+// scheduling demands, and the reference implementation forwards them
+// unconditionally: a missing request becomes an explicit zero, which selects the
+// specified-resources branch of the actor options and charges no CPU per method
+// call. Dropping the zero instead leaves an empty map, and an empty map asks the
+// actor bridge for its defaults — a placement requirement of one CPU, which a
+// supervisor pinned to a head node with a single CPU cannot always satisfy.
 func buildActorResources(numCPUs, numGPUs float64, memory int64, resources map[string]float64) map[string]float64 {
 	// A negative request cannot be satisfied; clamp it to the documented
 	// default of zero rather than forwarding it to the scheduler.

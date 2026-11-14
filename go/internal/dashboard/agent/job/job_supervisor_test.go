@@ -40,15 +40,15 @@ func TestBuildActorResources(t *testing.T) {
 }
 
 // TestBuildActorResourcesKeepsTheCPUBudgetExplicit pins why a zero request is
-// still materialized. An empty map reaches the C++ actor bridge empty, which
-// then injects its default actor CPU of 1, and an actor holds its creation
-// resources for its whole lifetime on the node it is placed on. The job
-// supervisor is pinned to the head node, so that unrequested reservation is
-// what starves every later job on a head configured with a single CPU.
+// still materialized. An empty map asks the C++ actor bridge for its defaults,
+// which charge one CPU for placement, and the job supervisor is pinned to a head
+// node that has a single CPU to give; forwarding the zero instead makes the CPU
+// requirement explicit and zero on both maps, as the reference implementation
+// does for a job that names no resources.
 func TestBuildActorResourcesKeepsTheCPUBudgetExplicit(t *testing.T) {
 	got := buildActorResources(0, 0, 0, nil)
 	cpus, ok := got["CPU"]
-	require.True(t, ok, "the CPU key must be present for a zero request, or the bridge injects 1 CPU")
+	require.True(t, ok, "the CPU key must be present for a zero request, or the bridge falls back to a placement requirement of 1 CPU")
 	assert.Equal(t, float64(0), cpus)
 
 	// A custom resource must not resurrect the default either: the zero CPU is
