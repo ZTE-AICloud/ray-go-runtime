@@ -18,7 +18,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -218,7 +221,7 @@ func TestAppendDriverLog(t *testing.T) {
 	jm := &JobManager{ctx: t.Context(), logClient: NewJobLogStorageClient(t.TempDir())}
 	jm.appendDriverLog("raysubmit_1", "Runtime env is setting up.")
 	jm.appendDriverLog("raysubmit_1", "Job failed.")
-	assert.Equal(t, "Runtime env is setting up.\nJob failed.\n", jm.getJobLogs("raysubmit_1"))
+	assert.Equal(t, "Runtime env is setting up.\nJob failed.\n", jm.logClient.getLogs("raysubmit_1"))
 }
 
 // TestPutStatusAfterTerminal proves a terminal status is not overwritten.
@@ -400,7 +403,7 @@ func TestHandleSupervisorFailureAfterCleanStop(t *testing.T) {
 	require.Len(t, sink.completed, 1)
 	assert.Equal(t, JobStatusStopped, sink.completed[0].status)
 	assert.Empty(t, sink.completed[0].errMsg)
-	assert.Empty(t, jm.getJobLogs("job1"), "an expected exit must not write an error line")
+	assert.Empty(t, jm.logClient.getLogs("job1"), "an expected exit must not write an error line")
 	assert.Empty(t, sink.started)
 }
 
@@ -421,7 +424,7 @@ func TestHandleSupervisorFailureWritesFailed(t *testing.T) {
 	require.Len(t, sink.completed, 1)
 	assert.Equal(t, JobStatusFailed, sink.completed[0].status)
 	assert.NotEmpty(t, sink.completed[0].errMsg)
-	assert.Contains(t, jm.getJobLogs("job1"), "Job supervisor actor died")
+	assert.Contains(t, jm.logClient.getLogs("job1"), "Job supervisor actor died")
 }
 
 // stagedStatusGCSClient scripts the status returned for one job's internal-KV
@@ -479,7 +482,7 @@ func TestHandleSupervisorFailureAfterTerminalRace(t *testing.T) {
 	require.Len(t, sink.completed, 1)
 	assert.Equal(t, JobStatusStopped, sink.completed[0].status)
 	assert.Empty(t, sink.completed[0].errMsg)
-	assert.Empty(t, jm.getJobLogs("job1"))
+	assert.Empty(t, jm.logClient.getLogs("job1"))
 	_, err := os.Stat(jm.logClient.getLogFilePath("job1"))
 	assert.True(t, os.IsNotExist(err), "an expected exit must not create a driver log")
 }
@@ -497,7 +500,7 @@ func TestHandleSupervisorFailureAfterDelete(t *testing.T) {
 	jm.handleSupervisorFailure("job1", errors.New("actor died"))
 
 	assert.Empty(t, sink.completed, "a deleted job must not emit a completion event")
-	assert.Empty(t, jm.getJobLogs("job1"))
+	assert.Empty(t, jm.logClient.getLogs("job1"))
 	_, err = os.Stat(jm.logClient.getLogFilePath("job1"))
 	assert.True(t, os.IsNotExist(err), "a deleted job must not get a recreated driver log")
 }
@@ -552,4 +555,26 @@ func TestSubmitJobRejectsReservedEntrypointResources(t *testing.T) {
 func TestValidateEntrypointResourcesAcceptsCustomNames(t *testing.T) {
 	assert.NoError(t, validateEntrypointResources(nil))
 	assert.NoError(t, validateEntrypointResources(map[string]float64{"custom": 1}))
+}
+
+// TestPreflightNodeManager pins the fail-closed guard around runtime init: an
+// unreachable node manager port must surface as an error (the caller degrades
+// to a 500) instead of reaching api.InitWithOptions, whose C++ core worker
+// would _Exit(1) the whole agent process on the dial failure.
+func TestPreflightNodeManager(t *testing.T) {
+	// An unreachable node manager port must fail closed.
+	err := preflightNodeManager("127.0.0.1", 1)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "node_manager_port unreachable")
+
+	// A reachable port (any local listener) passes preflight.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+	port, err := strconv.Atoi(strings.Split(ln.Addr().String(), ":")[1])
+	require.NoError(t, err)
+	assert.NoError(t, preflightNodeManager("127.0.0.1", int32(port)))
+
+	// An empty port is a no-op (no raylet to preflight).
+	assert.NoError(t, preflightNodeManager("127.0.0.1", 0))
 }
