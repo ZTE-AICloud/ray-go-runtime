@@ -658,6 +658,13 @@ func (m *JobManager) monitorJobInternal(jobID string, supervisor *supervisorActo
 			supervisor, err = getSupervisorActorForJob(jobID)
 			if err != nil {
 				if errors.Is(err, rayerrors.ErrRuntimeNotInitialized) {
+					// The KV status is observable without the runtime, and the
+					// supervisor writes the authoritative terminal outcome into
+					// it: end the monitor as soon as the job is terminal instead
+					// of spinning until some submission initializes the runtime.
+					if jobStatus != nil && jobStatus.IsTerminal() {
+						break
+					}
 					continue
 				}
 				supervisor = nil

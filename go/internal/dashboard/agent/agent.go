@@ -50,7 +50,6 @@ type GCSClient interface {
 	PublishNodeResourceUsage(ctx context.Context, keyID, jsonPayload string) error
 	PublishErrorInfo(ctx context.Context, keyID string, payload gcs.ErrorInfoPayload) error
 	Address() string
-	ClusterID() ids.ClusterID
 	Close() error
 }
 

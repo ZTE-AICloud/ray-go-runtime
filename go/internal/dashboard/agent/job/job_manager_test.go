@@ -381,6 +381,38 @@ func newTestJobManager(t *testing.T) (*JobManager, *recordingEventSink) {
 	return jm, sink
 }
 
+// TestMonitorUninitializedRuntimeEndsOnTerminalStatus pins the uninitialized-
+// runtime branch of the monitor loop: the test binary never initializes the Go
+// runtime, so getSupervisorActorForJob returns ErrRuntimeNotInitialized on
+// every tick. The monitor must keep polling the recovered RUNNING job (never
+// failing it on a state this process cannot observe) and must end as soon as
+// the supervisor writes a terminal status into the KV, which is observable
+// without the runtime. Without the terminal check the loop would spin once per
+// second forever; the bounded context below only rescues such a spin, and the
+// elapsed assertion fails it.
+func TestMonitorUninitializedRuntimeEndsOnTerminalStatus(t *testing.T) {
+	jm, sink := newTestJobManager(t)
+	_, err := jm.jobInfoClient.PutInfo(t.Context(), "job1", &JobInfo{Entrypoint: "python -c pass", Status: JobStatusRunning}, false)
+	require.NoError(t, err)
+
+	monitorCtx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	jm.ctx = monitorCtx
+
+	start := time.Now()
+	require.NoError(t, jm.monitorJobInternal("job1", nil))
+	require.Less(t, time.Since(start), 5*time.Second,
+		"monitor did not end on the terminal status; it spun until the context rescued it")
+
+	// The monitor must not have falsified the authoritative terminal status,
+	// and a completed job emits no completion event from this path.
+	status, err := jm.jobInfoClient.GetStatus(t.Context(), "job1")
+	require.NoError(t, err)
+	require.NotNil(t, status)
+	assert.Equal(t, JobStatusSucceeded, *status)
+	assert.Empty(t, sink.completed)
+}
+
 // TestHandleSupervisorFailureAfterCleanStop covers the stop race: the monitor
 // loop still holds a stale PENDING status when the ping fails because the job
 // was stopped, so the failure handler must re-read the status and treat the
