@@ -458,8 +458,9 @@ func (m *JobManager) submitJob(ctx context.Context, req *JobSubmitRequest) (stri
 		Metadata:            req.Metadata,
 		EntrypointNumCPUs:   ptrFloat64(entrypointNumCPUs),
 		EntrypointNumGPUs:   ptrFloat64(entrypointNumGPUs),
-		EntrypointMemory:    ptrUint64(uint64(entrypointMemory)),
-		EntrypointResources: req.EntrypointResources,
+		EntrypointMemory:        ptrUint64(uint64(entrypointMemory)),
+		EntrypointResources:     req.EntrypointResources,
+		EntrypointLabelSelector: req.EntrypointLabelSelector,
 	}
 	var runtimeEnvJSONErr error
 	if req.RuntimeEnv != nil {
@@ -485,7 +486,9 @@ func (m *JobManager) submitJob(ctx context.Context, req *JobSubmitRequest) (stri
 		(jobInfo.EntrypointNumGPUs != nil && *jobInfo.EntrypointNumGPUs > 0) ||
 		(jobInfo.EntrypointMemory != nil && *jobInfo.EntrypointMemory > 0) ||
 		len(jobInfo.EntrypointResources) > 0
-	nodeAffinity := m.applySchedulingStrategy(submissionID, resourcesSpecified)
+	// A non-empty entrypoint_label_selector also disables head-node pinning so
+	// the scheduler can place the supervisor on a node matching the selector.
+	nodeAffinity := m.applySchedulingStrategy(submissionID, resourcesSpecified || len(req.EntrypointLabelSelector) > 0)
 
 	m.eventLogger.submissionStarted(submissionID)
 
@@ -542,6 +545,7 @@ func (m *JobManager) submitJob(ctx context.Context, req *JobSubmitRequest) (stri
 		numGPUs:        entrypointNumGPUs,
 		memory:         entrypointMemory,
 		resources:      req.EntrypointResources,
+		labelSelector:  req.EntrypointLabelSelector,
 		runtimeEnvJSON: supervisorRuntimeEnvJSON,
 		nodeAffinity:   nodeAffinity,
 	}

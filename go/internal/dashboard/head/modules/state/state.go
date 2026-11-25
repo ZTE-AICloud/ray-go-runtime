@@ -28,6 +28,7 @@ import (
 	"github.com/ray-project/ray/go/internal/dashboard/head"
 	"github.com/ray-project/ray/go/internal/dashboard/head/modules/job"
 	"github.com/ray-project/ray/go/internal/dashboard/head/modules/log"
+	"github.com/ray-project/ray/go/proto"
 )
 
 // defaultConcurrency bounds concurrent state API requests, aligned with
@@ -79,6 +80,12 @@ func New(cfg *head.HeadConfig, client *head.GCSClient) *StateHead {
 
 // Name returns the module name.
 func (s *StateHead) Name() string { return "StateHead" }
+
+// SetTaskEventsQuerier wires an in-process TaskEventsHead querier into StateHead
+// so list_tasks reads from TaskEventsHead when task-events-to-head is enabled.
+func (s *StateHead) SetTaskEventsQuerier(fn func(ctx context.Context, req *proto.GetTaskEventsRequest) (*proto.GetTaskEventsReply, error)) {
+	s.api.GetTaskEventsFn = fn
+}
 
 // Start has no background tasks.
 func (s *StateHead) Start(ctx context.Context) error { return nil }

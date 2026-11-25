@@ -9,6 +9,7 @@ go_library(
         "//go/internal/dashboard/head",
         "//go/internal/dashboard/head/modules/job",
         "//go/internal/dashboard/head/modules/log",
+        "//go/proto",
     ],
 )
 

@@ -524,6 +524,20 @@ func (o *actorOptions[T]) WithNodeAffinity(nodeID string, soft bool) T {
 	return o.self
 }
 
+// WithLabelSelector constrains actor scheduling to nodes matching all key=value labels.
+func (o *actorOptions[T]) WithLabelSelector(selector map[string]string) T {
+	if len(selector) > 0 {
+		copied := make(map[string]string, len(selector))
+		for k, v := range selector {
+			copied[k] = v
+		}
+		o.options.LabelSelector = copied
+	} else {
+		o.options.LabelSelector = nil
+	}
+	return o.self
+}
+
 // WithResources sets the resource requirements for the actor.
 //
 // Parameters:
@@ -1135,6 +1149,20 @@ func (c *PythonActorCreator) WithAsync(async bool) *PythonActorCreator {
 //   - *PythonActorCreator: The same actor creator for chaining.
 func (c *PythonActorCreator) WithNodeAffinity(nodeID string, soft bool) *PythonActorCreator {
 	c.options.NodeAffinity = &submitter.NodeAffinityOptions{NodeID: nodeID, Soft: soft}
+	return c
+}
+
+// WithLabelSelector constrains Python actor scheduling to nodes matching all key=value labels.
+func (c *PythonActorCreator) WithLabelSelector(selector map[string]string) *PythonActorCreator {
+	if len(selector) > 0 {
+		copied := make(map[string]string, len(selector))
+		for k, v := range selector {
+			copied[k] = v
+		}
+		c.options.LabelSelector = copied
+	} else {
+		c.options.LabelSelector = nil
+	}
 	return c
 }
 

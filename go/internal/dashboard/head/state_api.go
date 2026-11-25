@@ -46,6 +46,9 @@ type StateAPIManager struct {
 	// avoid a package cycle: head -> job would be circular since job depends
 	// on head. When nil, ListJobs falls back to the raw proto conversion.
 	ListJobsFn func(ctx context.Context) ([]map[string]interface{}, error)
+	// GetTaskEventsFn queries task events from an in-process TaskEventsHead
+	// store when RAY_enable_task_events_to_dashboard_head is enabled.
+	GetTaskEventsFn func(ctx context.Context, req *proto.GetTaskEventsRequest) (*proto.GetTaskEventsReply, error)
 }
 
 // NewStateAPIManager creates a state API manager backed by the GCS client.
@@ -202,7 +205,13 @@ func (m *StateAPIManager) ListTasks(ctx context.Context, opt *ListApiOptions) (*
 	// events) just like Python. The remaining filter columns are still applied
 	// locally in buildListResponse.
 	taskFiltersToGCS(opt, req.Filters)
-	reply, err := m.client.GetTaskEvents(ctxTimeout, req)
+	var reply *proto.GetTaskEventsReply
+	var err error
+	if m.GetTaskEventsFn != nil {
+		reply, err = m.GetTaskEventsFn(ctxTimeout, req)
+	} else {
+		reply, err = m.client.GetTaskEvents(ctxTimeout, req)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("query tasks from GCS: %w", err)
 	}

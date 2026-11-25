@@ -232,6 +232,18 @@ extern "C" CByteArray *CNativeTaskSubmitter_CreateActor(
           // data-transformation helper (extracted so it can be unit-tested).
           ray::go::TaskSubmitterOperations::MapConcurrencyGroupsFromC(options,
                                                                       &actor_options);
+          if (options->label_selector_count > 0 &&
+              options->label_selector_keys != nullptr &&
+              options->label_selector_values != nullptr) {
+            for (int i = 0; i < options->label_selector_count; ++i) {
+              if (options->label_selector_keys[i] != nullptr &&
+                  options->label_selector_values[i] != nullptr) {
+                actor_options.label_selector.emplace(
+                    options->label_selector_keys[i],
+                    options->label_selector_values[i]);
+              }
+            }
+          }
         }
 
         // Create actor using business logic layer

@@ -444,6 +444,23 @@ func convertActorCreationOptionsToC(opts *submitter.ActorCreationOptions, actorD
 		cOpts.node_affinity_soft = C.bool(opts.NodeAffinity.Soft)
 	}
 
+	if len(opts.LabelSelector) > 0 {
+		n := len(opts.LabelSelector)
+		keys := (**C.char)(C.malloc(C.size_t(n) * C.size_t(unsafe.Sizeof((*C.char)(nil)))))
+		vals := (**C.char)(C.malloc(C.size_t(n) * C.size_t(unsafe.Sizeof((*C.char)(nil)))))
+		keySlice := (*[1 << 20]*C.char)(unsafe.Pointer(keys))[:n:n]
+		valSlice := (*[1 << 20]*C.char)(unsafe.Pointer(vals))[:n:n]
+		i := 0
+		for k, v := range opts.LabelSelector {
+			keySlice[i] = C.CString(k)
+			valSlice[i] = C.CString(v)
+			i++
+		}
+		cOpts.label_selector_keys = keys
+		cOpts.label_selector_values = vals
+		cOpts.label_selector_count = C.int(n)
+	}
+
 	if opts.Name != "" {
 		cOpts.name = C.CString(opts.Name)
 	}
@@ -626,6 +643,27 @@ func freeActorCreationOptions(opts *C.CActorCreationOptions) {
 	}
 	if opts.node_affinity_node_id != nil {
 		C.free(unsafe.Pointer(opts.node_affinity_node_id))
+	}
+	if opts.label_selector_count > 0 {
+		n := int(opts.label_selector_count)
+		if opts.label_selector_keys != nil {
+			keySlice := (*[1 << 20]*C.char)(unsafe.Pointer(opts.label_selector_keys))[:n:n]
+			for i := 0; i < n; i++ {
+				if keySlice[i] != nil {
+					C.free(unsafe.Pointer(keySlice[i]))
+				}
+			}
+			C.free(unsafe.Pointer(opts.label_selector_keys))
+		}
+		if opts.label_selector_values != nil {
+			valSlice := (*[1 << 20]*C.char)(unsafe.Pointer(opts.label_selector_values))[:n:n]
+			for i := 0; i < n; i++ {
+				if valSlice[i] != nil {
+					C.free(unsafe.Pointer(valSlice[i]))
+				}
+			}
+			C.free(unsafe.Pointer(opts.label_selector_values))
+		}
 	}
 	// Free concurrency group flat arrays: each group's descriptor array
 	// (per-method inner 4-element arrays), then the per-group outer arrays.

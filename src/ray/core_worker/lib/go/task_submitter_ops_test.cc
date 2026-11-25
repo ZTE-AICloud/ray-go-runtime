@@ -702,6 +702,19 @@ TEST(TaskSubmitterOperationsBuildActorOptionsTest, NodeAffinityTakesPrecedence) 
   EXPECT_FALSE(built.scheduling_strategy.has_default_scheduling_strategy());
 }
 
+TEST_F(TaskSubmitterOpsTest, BuildActorOptions_LabelSelector) {
+  ray::go::ActorCreateOptions options;
+  options.label_selector = {{"pool", "gpu"}, {"fragile", "!1"}};
+
+  auto &ops = ray::go::TaskSubmitterOperations::GetInstance();
+  ray::core::ActorCreationOptions built = ops.BuildActorOptions(options);
+
+  const auto selector_map = built.label_selector.ToStringMap();
+  ASSERT_EQ(selector_map.size(), 2u);
+  EXPECT_EQ(selector_map.at("pool"), "gpu");
+  EXPECT_EQ(selector_map.at("fragile"), "!1");
+}
+
 // ============================================================================
 // MapConcurrencyGroupsFromC Tests
 //

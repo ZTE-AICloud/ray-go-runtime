@@ -73,6 +73,10 @@ typedef struct {
   // side's convertActorCreationOptionsToC).
   const char ***cg_fds;  // [cg_count][fd_count] 4-element Go FD string arrays
   int *cg_fd_counts;     // [cg_count] number of descriptors per group
+  // Label selector (parallel key/value C string arrays).
+  const char **label_selector_keys;    // [label_selector_count]
+  const char **label_selector_values;  // [label_selector_count]
+  int label_selector_count;            // Number of label selector entries
   int cg_count;          // number of groups
 } CActorCreationOptions;
 

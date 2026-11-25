@@ -400,7 +400,7 @@ ray::core::ActorCreationOptions TaskSubmitterOperations::BuildActorOptions(
       false,                      // enable_tensor_transport
       false,                      // enable_task_events
       {},                         // labels
-      {},                         // label_selector
+      ray::LabelSelector(options.label_selector),  // label_selector
       {});                        // fallback_strategy
 }
 

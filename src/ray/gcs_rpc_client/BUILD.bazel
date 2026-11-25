@@ -39,6 +39,7 @@ ray_cc_library(
         ":__subpackages__",
         "//:__pkg__",
         "//cpp:__pkg__",
+        "//src/ray/core_worker/lib/go:__pkg__",
         "//src/ray/core_worker/lib/java:__pkg__",
     ],
     deps = [

@@ -111,6 +111,10 @@ type ActorCreationOptions struct {
 	// scheduling strategy.
 	NodeAffinity *NodeAffinityOptions
 
+	// LabelSelector constrains actor scheduling to nodes matching all key=value
+	// labels.
+	LabelSelector map[string]string
+
 	// ConcurrencyGroups is the list of concurrency groups for this actor.
 	// Each group can have its own maximum concurrent calls limit.
 	// Defined locally to avoid circular dependency with api package.
