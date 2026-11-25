@@ -38,14 +38,14 @@ import (
 // the file browser over /logs/* and provides the ListLogs and StreamLog
 // gRPC methods.
 type LogAgentModule struct {
-	UnimplementedLogServiceServer
+	proto.UnimplementedLogServiceServer
 	logDir string
 }
 
 // Compile-time checks that LogAgentModule satisfies both contracts.
 var (
-	_ agent.Module     = (*LogAgentModule)(nil)
-	_ LogServiceServer = (*LogAgentModule)(nil)
+	_ agent.Module           = (*LogAgentModule)(nil)
+	_ proto.LogServiceServer = (*LogAgentModule)(nil)
 )
 
 // New builds a LogAgentModule from the agent config, verifying the configured
@@ -73,7 +73,7 @@ func (a *LogAgentModule) Start(ctx context.Context) error {
 // RegisterGRPC registers the LogService servicer on the agent's gRPC server,
 // mirroring Python's LogAgentV1Grpc.run in log_agent.py:267-269.
 func (a *LogAgentModule) RegisterGRPC(s *grpc.Server) error {
-	RegisterLogServiceServer(s, a)
+	proto.RegisterLogServiceServer(s, a)
 	return nil
 }
 
@@ -146,7 +146,7 @@ const (
 // waiting for appended content. When the requested filename cannot be resolved
 // to a real file inside the log directory, the LOG_GRPC_ERROR metadata header
 // is sent instead of stream data, which the client raises on.
-func (a *LogAgentModule) StreamLog(req *proto.StreamLogRequest, stream LogService_StreamLogServer) error {
+func (a *LogAgentModule) StreamLog(req *proto.StreamLogRequest, stream proto.LogService_StreamLogServer) error {
 	if req == nil {
 		return status.Error(codes.InvalidArgument, "request is nil")
 	}
@@ -210,7 +210,7 @@ func (a *LogAgentModule) StreamLog(req *proto.StreamLogRequest, stream LogServic
 // streamLogError reports an unresolvable log file through the LOG_GRPC_ERROR
 // metadata header, matching how log_agent.py surfaces resolution failures on a
 // successful RPC rather than a gRPC error code.
-func streamLogError(stream LogService_StreamLogServer, err error) error {
+func streamLogError(stream proto.LogService_StreamLogServer, err error) error {
 	if herr := stream.SendHeader(metadata.Pairs(logGRPCError, err.Error())); herr != nil {
 		return herr
 	}
@@ -223,7 +223,7 @@ func streamLogError(stream LogService_StreamLogServer, err error) error {
 // _stream_log_in_chunk in log_agent.py.
 func streamLogInChunk(
 	ctx context.Context,
-	stream LogService_StreamLogServer,
+	stream proto.LogService_StreamLogServer,
 	f *os.File,
 	startOffset int64,
 	endOffset int64,
