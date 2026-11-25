@@ -1,0 +1,14 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "serve",
+    srcs = ["client.go"],
+    importpath = "github.com/ray-project/ray/go/pkg/serve",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "serve_test",
+    srcs = ["client_test.go"],
+    embed = [":serve"],
+)
