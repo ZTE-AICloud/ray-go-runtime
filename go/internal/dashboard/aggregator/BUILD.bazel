@@ -26,6 +26,7 @@ go_library(
     deps = [
         "//go/internal/common",
         "//go/internal/dashboard/agent",
+        "//go/internal/dashboard/auth",
         "//go/pkg/log",
         "//go/proto",
         "@org_golang_google_grpc//:go_default_library",

@@ -17,6 +17,7 @@ package submitter
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/ray-project/ray/go/pkg/ids"
 	"github.com/ray-project/ray/go/pkg/log"
@@ -156,6 +157,22 @@ func ValidateMaxPendingCallsValue(maxPendingCalls int) error {
 // ValidateMaxPendingCalls validates the MaxPendingCalls field.
 func (o *ActorCreationOptions) ValidateMaxPendingCalls() error {
 	return ValidateMaxPendingCallsValue(o.MaxPendingCalls)
+}
+
+// ValidateLabelSelector validates LabelSelector keys and values before
+// passing them to the C++ LabelSelector constructor.
+func (o *ActorCreationOptions) ValidateLabelSelector() error {
+	for k, v := range o.LabelSelector {
+		if strings.TrimSpace(k) == "" {
+			return fmt.Errorf("label_selector key must not be empty")
+		}
+		if strings.HasPrefix(v, "in(") || strings.HasPrefix(v, "!in(") {
+			if !strings.HasSuffix(v, ")") {
+				return fmt.Errorf("label_selector value %q for key %q is missing closing ')'", v, k)
+			}
+		}
+	}
+	return nil
 }
 
 // NormalizeMaxPendingCalls resolves the "unset" zero value to the unlimited

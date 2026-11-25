@@ -65,6 +65,10 @@ type k8sEvent struct {
 	EventTime      string        `json:"eventTime"`
 	LastTimestamp  string        `json:"lastTimestamp"`
 	FirstTimestamp string        `json:"firstTimestamp"`
+	Series         struct {
+		LastObservedTime string `json:"lastObservedTime"`
+		Count            int32  `json:"count"`
+	} `json:"series"`
 	InvolvedObject struct {
 		Kind string `json:"kind"`
 		Name string `json:"name"`
@@ -75,10 +79,21 @@ type k8sEvent struct {
 	ReportingComponent string `json:"reportingComponent"`
 }
 
+type k8sPodList struct {
+	Items []k8sPod `json:"items"`
+}
+
+type k8sEventList struct {
+	Metadata struct {
+		ResourceVersion string `json:"resourceVersion"`
+	} `json:"metadata"`
+}
+
 // KubernetesEventProvider watches KubeRay cluster pods and Kubernetes Events
 // over the Kubernetes REST watch API using pure-Go net/http.
 type KubernetesEventProvider struct {
 	baseURL     string
+	tokenPath   string
 	token       string
 	httpClient  *http.Client
 	namespace   string
@@ -124,6 +139,7 @@ func NewInClusterKubernetesEventProvider(callback func(*proto.RayEvent)) (*Kuber
 
 	return &KubernetesEventProvider{
 		baseURL:     "https://" + net.JoinHostPort(host, port),
+		tokenPath:   k8sServiceAccountTokenPath,
 		token:       strings.TrimSpace(string(tokenBytes)),
 		httpClient:  client,
 		namespace:   namespace,
@@ -135,6 +151,12 @@ func NewInClusterKubernetesEventProvider(callback func(*proto.RayEvent)) (*Kuber
 
 // Run starts watching cluster pods and namespace events until ctx is cancelled.
 func (p *KubernetesEventProvider) Run(ctx context.Context) {
+	// Seed pod membership before consuming namespace events so initial events
+	// for existing pods are not dropped by isClusterObject.
+	if err := p.listClusterPods(ctx); err != nil && ctx.Err() == nil {
+		log.Log.Error(err, "k8s initial pod list failed; pod events may be dropped until watch syncs")
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
@@ -154,27 +176,42 @@ func (p *KubernetesEventProvider) watchLoop(ctx context.Context, fn func(context
 		if ctx.Err() != nil {
 			return
 		}
-		if err := fn(ctx); err != nil && ctx.Err() == nil {
+		err := fn(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil {
 			log.Log.Error(err, "k8s watch stream ended; retrying")
+		} else {
+			backoff = time.Second
 		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(backoff):
 		}
-		if backoff < 15*time.Second {
+		if err != nil && backoff < 15*time.Second {
 			backoff *= 2
 		}
 	}
 }
 
-func (p *KubernetesEventProvider) doWatch(ctx context.Context, path string) (io.ReadCloser, error) {
+func (p *KubernetesEventProvider) currentToken() string {
+	if p.tokenPath != "" {
+		if b, err := os.ReadFile(p.tokenPath); err == nil {
+			return strings.TrimSpace(string(b))
+		}
+	}
+	return p.token
+}
+
+func (p *KubernetesEventProvider) doRequest(ctx context.Context, path string) (io.ReadCloser, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+path, nil)
 	if err != nil {
 		return nil, err
 	}
-	if p.token != "" {
-		req.Header.Set("Authorization", "Bearer "+p.token)
+	if tok := p.currentToken(); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
@@ -182,19 +219,65 @@ func (p *KubernetesEventProvider) doWatch(ctx context.Context, path string) (io.
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		resp.Body.Close()
-		return nil, fmt.Errorf("k8s watch %s status %d", path, resp.StatusCode)
+		return nil, fmt.Errorf("k8s api %s status %d", path, resp.StatusCode)
 	}
 	return resp.Body, nil
+}
+
+func (p *KubernetesEventProvider) listClusterPods(ctx context.Context) error {
+	labelSel := url.QueryEscape(fmt.Sprintf("%s=%s", k8sClusterLabelKey, p.clusterName))
+	path := fmt.Sprintf("/api/v1/namespaces/%s/pods?labelSelector=%s&resourceVersion=0", url.PathEscape(p.namespace), labelSel)
+	body, err := p.doRequest(ctx, path)
+	if err != nil {
+		return err
+	}
+	defer body.Close()
+
+	var listResp k8sPodList
+	if err := json.NewDecoder(body).Decode(&listResp); err != nil {
+		return err
+	}
+	nextPods := make(map[string]struct{}, len(listResp.Items))
+	for _, pod := range listResp.Items {
+		if pod.Metadata.Name != "" {
+			nextPods[pod.Metadata.Name] = struct{}{}
+		}
+	}
+	p.mu.Lock()
+	p.clusterPods = nextPods
+	p.mu.Unlock()
+	return nil
+}
+
+func (p *KubernetesEventProvider) latestEventsResourceVersion(ctx context.Context) (string, error) {
+	path := fmt.Sprintf("/api/v1/namespaces/%s/events?limit=1&resourceVersion=0", url.PathEscape(p.namespace))
+	body, err := p.doRequest(ctx, path)
+	if err != nil {
+		return "", err
+	}
+	defer body.Close()
+
+	var listResp k8sEventList
+	if err := json.NewDecoder(body).Decode(&listResp); err != nil {
+		return "", err
+	}
+	return listResp.Metadata.ResourceVersion, nil
 }
 
 func (p *KubernetesEventProvider) watchPods(ctx context.Context) error {
 	labelSel := url.QueryEscape(fmt.Sprintf("%s=%s", k8sClusterLabelKey, p.clusterName))
 	path := fmt.Sprintf("/api/v1/namespaces/%s/pods?watch=true&labelSelector=%s", url.PathEscape(p.namespace), labelSel)
-	body, err := p.doWatch(ctx, path)
+	body, err := p.doRequest(ctx, path)
 	if err != nil {
 		return err
 	}
 	defer body.Close()
+
+	// Fresh watch without resourceVersion replays a full snapshot; reset map
+	// so pods deleted during a disconnect gap are pruned.
+	p.mu.Lock()
+	p.clusterPods = make(map[string]struct{})
+	p.mu.Unlock()
 
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
@@ -219,8 +302,15 @@ func (p *KubernetesEventProvider) watchPods(ctx context.Context) error {
 }
 
 func (p *KubernetesEventProvider) watchEvents(ctx context.Context) error {
+	rv, err := p.latestEventsResourceVersion(ctx)
+	if err != nil {
+		return err
+	}
 	path := fmt.Sprintf("/api/v1/namespaces/%s/events?watch=true", url.PathEscape(p.namespace))
-	body, err := p.doWatch(ctx, path)
+	if rv != "" {
+		path += "&resourceVersion=" + url.QueryEscape(rv)
+	}
+	body, err := p.doRequest(ctx, path)
 	if err != nil {
 		return err
 	}
@@ -232,6 +322,9 @@ func (p *KubernetesEventProvider) watchEvents(ctx context.Context) error {
 		var line k8sWatchLine
 		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
 			continue
+		}
+		if strings.EqualFold(line.Type, "ERROR") {
+			return fmt.Errorf("k8s events watch returned ERROR; relisting")
 		}
 		var ev k8sEvent
 		if err := json.Unmarshal(line.Object, &ev); err != nil {
@@ -267,8 +360,9 @@ func (p *KubernetesEventProvider) convertK8sEvent(ev *k8sEvent) *proto.RayEvent 
 		severity = proto.RayEvent_WARNING
 	}
 
+	// Prefer most recent occurrence, aligned with Python _extract_k8s_event_timestamp.
 	ts := time.Now().UTC()
-	for _, rawTS := range []string{ev.EventTime, ev.LastTimestamp, ev.FirstTimestamp} {
+	for _, rawTS := range []string{ev.Series.LastObservedTime, ev.LastTimestamp, ev.EventTime, ev.FirstTimestamp} {
 		if rawTS != "" {
 			if parsed, err := time.Parse(time.RFC3339Nano, rawTS); err == nil {
 				ts = parsed
@@ -282,6 +376,11 @@ func (p *KubernetesEventProvider) convertK8sEvent(ev *k8sEvent) *proto.RayEvent 
 		component = ev.ReportingComponent
 	}
 
+	ns := ev.Metadata.Namespace
+	if ns == "" {
+		ns = p.namespace
+	}
+
 	return &proto.RayEvent{
 		EventId:    []byte(ev.Metadata.UID),
 		SourceType: proto.RayEvent_CLUSTER_LIFECYCLE,
@@ -293,9 +392,14 @@ func (p *KubernetesEventProvider) convertK8sEvent(ev *k8sEvent) *proto.RayEvent 
 			Source: &proto.Source{
 				Platform:  proto.Source_KUBERNETES,
 				Component: component,
+				Metadata: map[string]string{
+					"namespace":        ns,
+					"ray_cluster_name": p.clusterName,
+				},
 			},
 			ObjectKind: ev.InvolvedObject.Kind,
 			ObjectName: ev.InvolvedObject.Name,
+			Message:    ev.Message,
 			Reason:     ev.Reason,
 		},
 	}

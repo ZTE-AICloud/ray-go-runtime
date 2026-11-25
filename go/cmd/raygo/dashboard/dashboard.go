@@ -197,10 +197,11 @@ func runDashboard(ctx context.Context) error {
 	// subprocesses/module.py.
 	mods := []head.HeadModule{}
 	stateHead := state.New(cfg, client)
+	reporterHead := reporter.New(cfg, client)
 	allMods := []head.HeadModule{
 		stateHead,
 		node.New(cfg, client),
-		reporter.New(cfg, client),
+		reporterHead,
 		logmod.New(cfg, client),
 		event.New(cfg, client),
 		metrics.New(cfg, client),
@@ -212,9 +213,9 @@ func runDashboard(ctx context.Context) error {
 		train.New(cfg, client),
 		data.New(cfg, client),
 	}
+	var taskEventsHead *task_events.TaskEventsHead
 	if task_events.IsEnabled() {
-		taskEventsHead := task_events.New(cfg, client)
-		stateHead.SetTaskEventsQuerier(taskEventsHead.Query)
+		taskEventsHead = task_events.New(cfg, client)
 		allMods = append(allMods, taskEventsHead)
 	}
 	if platform_events.IsEnabled() {
@@ -242,6 +243,15 @@ func runDashboard(ctx context.Context) error {
 		for _, m := range allMods {
 			if load[m.Name()] && !disabled[m.Name()] {
 				mods = append(mods, m)
+			}
+		}
+	}
+	if taskEventsHead != nil {
+		for _, m := range mods {
+			if m == taskEventsHead {
+				stateHead.SetTaskEventsQuerier(taskEventsHead.Query)
+				reporterHead.SetTaskEventsQuerier(taskEventsHead.Query)
+				break
 			}
 		}
 	}

@@ -31,6 +31,7 @@ import (
 
 	"github.com/ray-project/ray/go/internal/common"
 	"github.com/ray-project/ray/go/internal/dashboard/agent"
+	"github.com/ray-project/ray/go/internal/dashboard/auth"
 	"github.com/ray-project/ray/go/pkg/log"
 	"github.com/ray-project/ray/go/proto"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -568,6 +569,9 @@ func (c *DashboardHeadPublisherClient) Publish(ctx context.Context, batch Publis
 		return PublishStats{}, fmt.Errorf("build dashboard head request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-protobuf")
+	if token, ok := auth.RequestToken(); ok {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

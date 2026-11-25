@@ -90,7 +90,7 @@ func (h *PlatformEventsHead) Start(ctx context.Context) error {
 	}
 	provider, err := NewInClusterKubernetesEventProvider(h.RecordEvent)
 	if err != nil {
-		log.Log.Info("platform_events k8s provider not started", "reason", err.Error())
+		log.Log.Error(err, "platform_events k8s provider not started")
 		return nil
 	}
 	go provider.Run(ctx)

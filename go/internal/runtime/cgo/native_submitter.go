@@ -55,6 +55,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"sort"
 	"time"
 	"unsafe"
 
@@ -140,6 +141,9 @@ func (s *NativeTaskSubmitter) CreateActor(
 	// zero-value struct valid while keeping behavior consistent with local_mode.
 	if options != nil {
 		if err := options.ValidateMaxPendingCalls(); err != nil {
+			return ids.NilActorID(), err
+		}
+		if err := options.ValidateLabelSelector(); err != nil {
 			return ids.NilActorID(), err
 		}
 		options.NormalizeMaxPendingCalls()
@@ -446,15 +450,18 @@ func convertActorCreationOptionsToC(opts *submitter.ActorCreationOptions, actorD
 
 	if len(opts.LabelSelector) > 0 {
 		n := len(opts.LabelSelector)
+		sortedKeys := make([]string, 0, n)
+		for k := range opts.LabelSelector {
+			sortedKeys = append(sortedKeys, k)
+		}
+		sort.Strings(sortedKeys)
 		keys := (**C.char)(C.malloc(C.size_t(n) * C.size_t(unsafe.Sizeof((*C.char)(nil)))))
 		vals := (**C.char)(C.malloc(C.size_t(n) * C.size_t(unsafe.Sizeof((*C.char)(nil)))))
 		keySlice := (*[1 << 20]*C.char)(unsafe.Pointer(keys))[:n:n]
 		valSlice := (*[1 << 20]*C.char)(unsafe.Pointer(vals))[:n:n]
-		i := 0
-		for k, v := range opts.LabelSelector {
+		for i, k := range sortedKeys {
 			keySlice[i] = C.CString(k)
-			valSlice[i] = C.CString(v)
-			i++
+			valSlice[i] = C.CString(opts.LabelSelector[k])
 		}
 		cOpts.label_selector_keys = keys
 		cOpts.label_selector_values = vals

@@ -196,22 +196,29 @@ func (c *Client) DeleteJob(ctx context.Context, id string) (bool, error) {
 }
 
 // WaitForCompletion polls GetJobInfo until the job reaches a terminal status or ctx is cancelled.
+// Transient GetJobInfo errors are tolerated until ctx is done.
 func (c *Client) WaitForCompletion(ctx context.Context, id string, pollInterval time.Duration) (*JobDetails, error) {
 	if pollInterval <= 0 {
 		pollInterval = time.Second
 	}
+	var lastErr error
 	for {
 		info, err := c.GetJobInfo(ctx, id)
 		if err != nil {
-			return nil, err
-		}
-		if info.IsTerminal() {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			lastErr = err
+		} else if info.IsTerminal() {
 			return info, nil
 		}
 		timer := time.NewTimer(pollInterval)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
+			if lastErr != nil {
+				return nil, fmt.Errorf("%w (last poll error: %v)", ctx.Err(), lastErr)
+			}
 			return nil, ctx.Err()
 		case <-timer.C:
 		}

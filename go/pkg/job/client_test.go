@@ -36,8 +36,13 @@ func TestJobClientLifecycle(t *testing.T) {
 			_ = json.Unmarshal(body, &gotSubmit)
 			_ = json.NewEncoder(w).Encode(SubmitResponse{JobID: "sub_1", SubmissionID: "sub_1"})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/jobs/sub_1":
+			n := polls.Add(1)
+			if n == 1 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
 			st := "RUNNING"
-			if polls.Add(1) >= 2 {
+			if n >= 3 {
 				st = "SUCCEEDED"
 			}
 			_ = json.NewEncoder(w).Encode(JobDetails{Status: st, Entrypoint: gotSubmit.Entrypoint})

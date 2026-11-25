@@ -78,6 +78,10 @@ func TestKubernetesEventProviderWatchPodsAndEvents(t *testing.T) {
 		case "/api/v1/namespaces/zenap/pods":
 			_, _ = w.Write([]byte(`{"type":"ADDED","object":{"metadata":{"name":"ray-head-1","uid":"p1"}}}` + "\n"))
 		case "/api/v1/namespaces/zenap/events":
+			if r.URL.Query().Get("watch") == "" {
+				_, _ = w.Write([]byte(`{"metadata":{"resourceVersion":"10"}}`))
+				return
+			}
 			_, _ = w.Write([]byte(`{"type":"ADDED","object":{"metadata":{"uid":"ev-1","name":"ev-1"},"type":"Warning","reason":"BackOff","message":"restarting","involvedObject":{"kind":"Pod","name":"ray-head-1"}}}` + "\n"))
 			_, _ = w.Write([]byte(`{"type":"ADDED","object":{"metadata":{"uid":"ev-other","name":"ev-other"},"type":"Normal","reason":"Pulled","message":"ignored","involvedObject":{"kind":"Pod","name":"unrelated-pod"}}}` + "\n"))
 		default:
