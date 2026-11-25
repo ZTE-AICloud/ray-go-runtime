@@ -26,6 +26,7 @@ import (
 	"github.com/ray-project/ray/go/internal/common"
 	"github.com/ray-project/ray/go/internal/dashboard/agent"
 	dashboardjob "github.com/ray-project/ray/go/internal/dashboard/agent/job"
+	"github.com/ray-project/ray/go/internal/dashboard/aggregator"
 	dashboardevent "github.com/ray-project/ray/go/internal/dashboard/event"
 	"github.com/ray-project/ray/go/internal/dashboard/healthz"
 	dashboardlog "github.com/ray-project/ray/go/internal/dashboard/log"
@@ -411,7 +412,11 @@ func buildModules(cfg agent.Config) ([]agent.Module, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create job module: %w", err)
 	}
-	return []agent.Module{logAgent, healthzAgent, eventAgent, reporterAgent, jobAgent}, nil
+	aggregatorAgent, err := aggregator.New(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("create aggregator module: %w", err)
+	}
+	return []agent.Module{logAgent, healthzAgent, eventAgent, reporterAgent, jobAgent, aggregatorAgent}, nil
 }
 
 // isValidLogLevel reports whether level is one of common.LoggerLevelChoices.

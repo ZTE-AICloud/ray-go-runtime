@@ -25,6 +25,7 @@ import (
 	"github.com/ray-project/ray/go/internal/common"
 	"github.com/ray-project/ray/go/internal/dashboard/agent"
 	dashboardjob "github.com/ray-project/ray/go/internal/dashboard/agent/job"
+	"github.com/ray-project/ray/go/internal/dashboard/aggregator"
 	dashboardevent "github.com/ray-project/ray/go/internal/dashboard/event"
 	"github.com/ray-project/ray/go/internal/dashboard/healthz"
 	dashboardlog "github.com/ray-project/ray/go/internal/dashboard/log"
@@ -429,13 +430,13 @@ func (f *buildModulesFakeGCS) GetAll(_ context.Context, nodeIDs []ids.NodeID) (m
 // serving.
 func TestBuildModules(t *testing.T) {
 	fakeGCS := &buildModulesFakeGCS{}
-	t.Run("returns log, healthz, event, reporter and job modules", func(t *testing.T) {
+	t.Run("returns log, healthz, event, reporter, job and aggregator modules", func(t *testing.T) {
 		mods, err := buildModules(agent.Config{LogDir: t.TempDir(), GCS: fakeGCS})
 		if err != nil {
 			t.Fatalf("buildModules: %v", err)
 		}
-		if len(mods) != 5 {
-			t.Fatalf("buildModules returned %d modules, want 5", len(mods))
+		if len(mods) != 6 {
+			t.Fatalf("buildModules returned %d modules, want 6", len(mods))
 		}
 		if _, ok := mods[0].(*dashboardlog.LogAgentModule); !ok {
 			t.Errorf("module[0] type = %T, want *log.LogAgentModule", mods[0])
@@ -451,6 +452,9 @@ func TestBuildModules(t *testing.T) {
 		}
 		if _, ok := mods[4].(*dashboardjob.JobAgent); !ok {
 			t.Errorf("module[4] type = %T, want *job.JobAgent", mods[4])
+		}
+		if _, ok := mods[5].(*aggregator.AggregatorAgent); !ok {
+			t.Errorf("module[5] type = %T, want *aggregator.AggregatorAgent", mods[5])
 		}
 	})
 

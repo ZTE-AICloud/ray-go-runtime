@@ -37,6 +37,9 @@ type fakeGCS struct {
 	proto.UnimplementedObservabilityPubSubServiceServer
 	proto.UnimplementedNodeInfoGcsServiceServer
 	proto.UnimplementedJobInfoGcsServiceServer
+	proto.UnimplementedRayEventExportGcsServiceServer
+	gotAddEvents *proto.AddEventsRequest
+	addEventsErr error
 	kvValue    []byte
 	kvNotFound bool
 	kvErr      error
@@ -154,6 +157,7 @@ func startMockGCS(t *testing.T, f *fakeGCS) string {
 	proto.RegisterObservabilityPubSubServiceServer(server, f)
 	proto.RegisterNodeInfoGcsServiceServer(server, f)
 	proto.RegisterJobInfoGcsServiceServer(server, f)
+	proto.RegisterRayEventExportGcsServiceServer(server, f)
 	go func() { _ = server.Serve(lis) }()
 	t.Cleanup(server.Stop)
 	return lis.Addr().String()
@@ -526,5 +530,37 @@ func TestClusterIDRoundTrip(t *testing.T) {
 	}
 	if c.Address() == "" {
 		t.Fatal("Address() is empty, want the dialed target")
+	}
+}
+
+func (f *fakeGCS) AddEvents(_ context.Context, req *proto.AddEventsRequest) (*proto.AddEventsReply, error) {
+	f.gotAddEvents = req
+	if f.addEventsErr != nil {
+		return nil, f.addEventsErr
+	}
+	return &proto.AddEventsReply{Status: &proto.AddEventsStatus{Code: 0}}, nil
+}
+
+func TestAddEvents(t *testing.T) {
+	f := &fakeGCS{}
+	c := newTestClient(t, f)
+	c.clusterID = strings.Repeat("11", 28)
+
+	req := &proto.AddEventsRequest{
+		EventsData: &proto.RayEventsData{
+			Events: []*proto.RayEvent{
+				{EventId: []byte("evt-1"), EventType: proto.RayEvent_TASK_DEFINITION_EVENT},
+			},
+		},
+	}
+	reply, err := c.AddEvents(context.Background(), req)
+	if err != nil {
+		t.Fatalf("AddEvents() error = %v", err)
+	}
+	if reply.GetStatus().GetCode() != 0 {
+		t.Fatalf("AddEvents() status = %v, want 0", reply.GetStatus().GetCode())
+	}
+	if f.gotAddEvents == nil || len(f.gotAddEvents.GetEventsData().GetEvents()) != 1 {
+		t.Fatalf("fakeGCS gotAddEvents = %v, want 1 event", f.gotAddEvents)
 	}
 }
