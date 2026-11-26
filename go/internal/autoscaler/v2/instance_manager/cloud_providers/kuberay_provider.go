@@ -488,12 +488,33 @@ func (p *KubeRayProvider) Terminate(ids []string, requestID string) error {
 	}
 
 	byGroup := make(map[string][]string)
+	var missingGroupErr error
 	for _, id := range ids {
-		if inst, ok := livePods[id]; ok && inst.NodeType != "" {
-			byGroup[inst.NodeType] = append(byGroup[inst.NodeType], id)
-		} else {
+		inst, ok := livePods[id]
+		if !ok {
 			log.Log.V(1).Info("kuberay terminate: pod not in live set", "pod", id)
+			continue
 		}
+		if inst.NodeType == "" {
+			err := fmt.Errorf("pod %s missing ray.io/group label", id)
+			p.recordError(&autoscaler.TerminateNodeError{
+				CloudInstanceProviderError: autoscaler.CloudInstanceProviderError{
+					Msg:         err.Error(),
+					TimestampNs: time.Now().UnixNano(),
+				},
+				CloudInstanceId: id,
+				RequestId:       requestID,
+				Cause:           err,
+			})
+			if missingGroupErr == nil {
+				missingGroupErr = err
+			}
+			continue
+		}
+		byGroup[inst.NodeType] = append(byGroup[inst.NodeType], id)
+	}
+	if missingGroupErr != nil {
+		return missingGroupErr
 	}
 
 	var patches []jsonPatchOp

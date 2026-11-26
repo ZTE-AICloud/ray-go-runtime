@@ -117,3 +117,36 @@ func TestKubeRayProviderLaunchCappedByMaxReplicas(t *testing.T) {
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0].Error(), "maxReplicas")
 }
+
+func TestKubeRayProviderTerminateMissingGroupLabel(t *testing.T) {
+	patched := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/namespaces/test-ns/pods":
+			_, _ = w.Write([]byte(`{"items":[{"metadata":{"name":"ray-worker-nogroup","uid":"uid-1","labels":{"ray.io/cluster":"rc1","ray.io/node-type":"worker"}},"status":{"phase":"Running"}}]}`))
+		case "/apis/ray.io/v1/namespaces/test-ns/rayclusters/rc1":
+			if r.Method == http.MethodGet {
+				_, _ = w.Write([]byte(`{"spec":{"workerGroupSpecs":[{"groupName":"wg1","replicas":1}]}}`))
+				return
+			}
+			patched = true
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	p := newKubeRayProviderWithClient("rc1", "test-ns", srv.URL, srv.Client())
+	err := p.Terminate([]string{"ray-worker-nogroup"}, "req-missing-group")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing ray.io/group label")
+	assert.False(t, patched)
+
+	errs := p.PollErrors()
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0].Error(), "missing ray.io/group label")
+
+	// Should not be marked processed, so retrying still returns error.
+	require.Error(t, p.Terminate([]string{"ray-worker-nogroup"}, "req-missing-group"))
+}
