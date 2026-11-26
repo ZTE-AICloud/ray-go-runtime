@@ -77,7 +77,7 @@ typedef struct {
   const char **label_selector_keys;    // [label_selector_count]
   const char **label_selector_values;  // [label_selector_count]
   int label_selector_count;            // Number of label selector entries
-  int cg_count;          // number of groups
+  int cg_count;                        // number of groups
 } CActorCreationOptions;
 
 // ============================================================================

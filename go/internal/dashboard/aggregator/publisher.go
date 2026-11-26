@@ -85,9 +85,9 @@ type PublishBatch struct {
 
 // PublishStats summarizes a single publish attempt.
 type PublishStats struct {
-	Success          bool
-	NumPublished     int
-	NumFilteredOut   int
+	Success        bool
+	NumPublished   int
+	NumFilteredOut int
 }
 
 // PublisherClient delivers a PublishBatch to a destination.
@@ -575,13 +575,18 @@ func (c *DashboardHeadPublisherClient) Publish(ctx context.Context, batch Publis
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		// Transport failure: the head may have restarted at a new address, so
+		// the next publish re-resolves the endpoint from GCS KV. Matches the
+		// Python async publisher, which drops its cached endpoint only on
+		// connection errors and timeouts.
 		c.invalidateEndpoint()
 		return PublishStats{}, err
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		c.invalidateEndpoint()
+		// A reachable head answering non-2xx does not invalidate the cached
+		// endpoint: the address came from GCS KV and is still authoritative.
 		return PublishStats{}, fmt.Errorf("dashboard head status %d", resp.StatusCode)
 	}
 

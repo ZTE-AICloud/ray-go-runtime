@@ -151,13 +151,13 @@ type JobInfo struct {
 
 // JobSubmitRequest is the parsed body of POST /api/job_agent/jobs.
 type JobSubmitRequest struct {
-	Entrypoint          string                 `json:"entrypoint"`
-	SubmissionID        *string                `json:"submission_id"`
-	JobID               *string                `json:"job_id"`
-	RuntimeEnv          map[string]interface{} `json:"runtime_env"`
-	Metadata            map[string]string      `json:"metadata"`
-	EntrypointNumCPUs   *float64               `json:"entrypoint_num_cpus"`
-	EntrypointNumGPUs   *float64               `json:"entrypoint_num_gpus"`
+	Entrypoint              string                 `json:"entrypoint"`
+	SubmissionID            *string                `json:"submission_id"`
+	JobID                   *string                `json:"job_id"`
+	RuntimeEnv              map[string]interface{} `json:"runtime_env"`
+	Metadata                map[string]string      `json:"metadata"`
+	EntrypointNumCPUs       *float64               `json:"entrypoint_num_cpus"`
+	EntrypointNumGPUs       *float64               `json:"entrypoint_num_gpus"`
 	EntrypointMemory        *uint64                `json:"entrypoint_memory"`
 	EntrypointResources     map[string]float64     `json:"entrypoint_resources"`
 	EntrypointLabelSelector map[string]string      `json:"entrypoint_label_selector"`

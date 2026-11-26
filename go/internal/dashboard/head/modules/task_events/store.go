@@ -281,12 +281,12 @@ func (s *TaskEventStore) Query(req *proto.GetTaskEventsRequest) *proto.GetTaskEv
 	}
 
 	return &proto.GetTaskEventsReply{
-		Status:                     &proto.GcsStatus{Code: 0},
-		EventsByTask:               matched,
+		Status:                      &proto.GcsStatus{Code: 0},
+		EventsByTask:                matched,
 		NumProfileTaskEventsDropped: 0,
 		NumStatusTaskEventsDropped:  int32(s.droppedStatusCount),
-		NumTotalStored:             int64(len(s.byAttempt)),
-		NumTruncated:               truncated,
+		NumTotalStored:              int64(len(s.byAttempt)),
+		NumTruncated:                truncated,
 	}
 }
 

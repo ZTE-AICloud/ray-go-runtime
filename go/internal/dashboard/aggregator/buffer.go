@@ -86,6 +86,10 @@ func (b *MultiConsumerEventBuffer) AddEvent(event *proto.RayEvent) {
 
 	dropped := false
 	if len(b.buffer) >= b.maxSize {
+		// Release the evicted event so the sliding window does not keep it
+		// reachable through the backing array (evictOldEventsLocked nils its
+		// prefix for the same reason).
+		b.buffer[0] = nil
 		b.buffer = b.buffer[1:]
 		dropped = true
 	}

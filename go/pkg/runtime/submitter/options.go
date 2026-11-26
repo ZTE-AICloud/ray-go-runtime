@@ -17,6 +17,7 @@ package submitter
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/ray-project/ray/go/pkg/ids"
@@ -159,18 +160,63 @@ func (o *ActorCreationOptions) ValidateMaxPendingCalls() error {
 	return ValidateMaxPendingCallsValue(o.MaxPendingCalls)
 }
 
-// ValidateLabelSelector validates LabelSelector keys and values before
-// passing them to the C++ LabelSelector constructor.
+// Label syntax rules ported from python/ray/_private/label_utils.py so the Go
+// actor-creation path rejects exactly the selectors the Python path rejects:
+// keys carry an optional DNS-label prefix and a <= 63 char name starting and
+// ending with an alphanumeric character, and values are a single label, an
+// optional "!"+label, or an optionally "!"-prefixed in(...) list of labels.
+var (
+	labelRegex         = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9_.-]{0,61}[a-zA-Z0-9])?$`)
+	labelPrefixRegex   = regexp.MustCompile(`^(?:[a-zA-Z0-9](?:[a-zA-Z0-9_.-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9_.-]{0,61}[a-zA-Z0-9])?)*)?$`)
+	labelSelectorRegex = regexp.MustCompile(`^!?(?:in)?\([a-zA-Z0-9](?:[a-zA-Z0-9_.-]{0,61}[a-zA-Z0-9])?(?:, ?[a-zA-Z0-9](?:[a-zA-Z0-9_.-]{0,61}[a-zA-Z0-9])?)*\)$|^!?[a-zA-Z0-9](?:[a-zA-Z0-9_.-]{0,61}[a-zA-Z0-9])?$`)
+)
+
+// ValidateLabelSelector validates LabelSelector keys and values with the same
+// syntax rules as python validate_label_selector before passing them to the
+// C++ LabelSelector constructor, so a malformed selector fails at submission
+// instead of silently never matching a node.
 func (o *ActorCreationOptions) ValidateLabelSelector() error {
 	for k, v := range o.LabelSelector {
-		if strings.TrimSpace(k) == "" {
-			return fmt.Errorf("label_selector key must not be empty")
+		if err := validateLabelKey(k); err != nil {
+			return fmt.Errorf("invalid label_selector key %q: %w", k, err)
 		}
-		if strings.HasPrefix(v, "in(") || strings.HasPrefix(v, "!in(") {
-			if !strings.HasSuffix(v, ")") {
-				return fmt.Errorf("label_selector value %q for key %q is missing closing ')'", v, k)
-			}
+		if v == "" {
+			continue
 		}
+		if err := validateLabelSelectorValue(v); err != nil {
+			return fmt.Errorf("invalid label_selector value %q for key %q: %w", v, k, err)
+		}
+	}
+	return nil
+}
+
+// validateLabelKey mirrors python validate_label_key: an optional
+// "<prefix>/" with a prefix of dot-separated labels (253 characters or less),
+// followed by a name of 63 characters or less that starts and ends with an
+// alphanumeric character and contains only alphanumerics, dashes (-),
+// underscores (_) and dots (.).
+func validateLabelKey(key string) error {
+	name := key
+	if idx := strings.LastIndex(key, "/"); idx >= 0 {
+		prefix := key[:idx]
+		name = key[idx+1:]
+		if len(prefix) > 253 || !labelPrefixRegex.MatchString(prefix) {
+			return fmt.Errorf("invalid prefix %q: must be a series of DNS labels separated by dots (.), 253 characters or less", prefix)
+		}
+	}
+	if len(name) > 63 || !labelRegex.MatchString(name) {
+		return fmt.Errorf("invalid name %q: must be 63 characters or less, start and end with an alphanumeric character, and contain only alphanumerics, dashes (-), underscores (_) and dots (.)", name)
+	}
+	return nil
+}
+
+// validateLabelSelectorValue mirrors python validate_label_selector_value: an
+// empty value matches every node; otherwise the value is a single label,
+// optionally negated with "!", or an optionally negated in(...) list of
+// comma-separated labels.
+func validateLabelSelectorValue(value string) error {
+	if !labelSelectorRegex.MatchString(value) {
+		return fmt.Errorf("must be a label value, an optional !-negated label value, or an optional !-negated in(...) list of comma-separated label values, each 63 characters or less and starting and ending with an alphanumeric character")
 	}
 	return nil
 }

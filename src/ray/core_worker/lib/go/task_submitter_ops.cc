@@ -396,12 +396,12 @@ ray::core::ActorCreationOptions TaskSubmitterOperations::BuildActorOptions(
       std::move(concurrency_groups),  // concurrency_groups
       options.is_asyncio,             // allow_out_of_order_execution; align with Java:
                            // ActorCreationOptions.allowOutOfOrderExecution = isAsync
-      options.max_pending_calls,  // max_pending_calls
-      false,                      // enable_tensor_transport
-      false,                      // enable_task_events
-      {},                         // labels
+      options.max_pending_calls,                   // max_pending_calls
+      false,                                       // enable_tensor_transport
+      false,                                       // enable_task_events
+      {},                                          // labels
       ray::LabelSelector(options.label_selector),  // label_selector
-      {});                        // fallback_strategy
+      {});                                         // fallback_strategy
 }
 
 ray::rpc::SchedulingStrategy TaskSubmitterOperations::BuildSchedulingStrategy(

@@ -38,9 +38,11 @@ type fakeAddEventsGCS struct {
 	gotReq *proto.AddEventsRequest
 	reply  *proto.AddEventsReply
 	rpcErr error
+	kvGets atomic.Int32
 }
 
 func (f *fakeAddEventsGCS) Get(_ context.Context, namespace, key string) ([]byte, error) {
+	f.kvGets.Add(1)
 	if f.kvErr != nil {
 		return nil, f.kvErr
 	}
@@ -77,8 +79,8 @@ func (f *fakeAddEventsGCS) PublishNodeResourceUsage(context.Context, string, str
 func (f *fakeAddEventsGCS) PublishErrorInfo(context.Context, string, gcs.ErrorInfoPayload) error {
 	return nil
 }
-func (f *fakeAddEventsGCS) Address() string                                           { return "" }
-func (f *fakeAddEventsGCS) Close() error                                              { return nil }
+func (f *fakeAddEventsGCS) Address() string { return "" }
+func (f *fakeAddEventsGCS) Close() error    { return nil }
 func (f *fakeAddEventsGCS) AddEvents(_ context.Context, req *proto.AddEventsRequest) (*proto.AddEventsReply, error) {
 	f.gotReq = req
 	if f.rpcErr != nil {
@@ -205,6 +207,38 @@ func TestDashboardHeadPublisherClient(t *testing.T) {
 	}
 	if len(gotReq.GetEventsData().GetEvents()) != 1 {
 		t.Fatalf("got %d events, want 1", len(gotReq.GetEventsData().GetEvents()))
+	}
+}
+
+// TestDashboardHeadPublisherClient_KeepsEndpointOnHTTPError pins the cache
+// policy: a reachable head answering non-2xx must not invalidate the endpoint
+// resolved from GCS KV, matching the Python async publisher which re-resolves
+// only on connection errors and timeouts.
+func TestDashboardHeadPublisherClient_KeepsEndpointOnHTTPError(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	gcsFake := &fakeAddEventsGCS{kvAddr: srv.URL}
+	client := NewDashboardHeadPublisherClient(gcsFake, srv.Client())
+	batch := PublishBatch{
+		Events: []*proto.RayEvent{{EventId: []byte("t1"), EventType: proto.RayEvent_TASK_LIFECYCLE_EVENT}},
+	}
+
+	if _, err := client.Publish(context.Background(), batch); err == nil {
+		t.Fatalf("first Publish should fail on the injected 500")
+	}
+	if _, err := client.Publish(context.Background(), batch); err != nil {
+		t.Fatalf("second Publish: %v", err)
+	}
+	if got := gcsFake.kvGets.Load(); got != 1 {
+		t.Fatalf("KV lookups = %d, want 1: a non-2xx response must not clear the cached endpoint", got)
 	}
 }
 

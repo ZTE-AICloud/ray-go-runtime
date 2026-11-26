@@ -71,11 +71,19 @@ func (h *TaskEventsHead) RegisterHTTP(mux *http.ServeMux) error {
 	return nil
 }
 
-// Start runs the module lifecycle until ctx is cancelled.
+// maxRequestBodyBytes caps request bodies at the same limit as the Python
+// dashboard (ray_constants.DASHBOARD_CLIENT_MAX_SIZE, enforced there through
+// aiohttp client_max_size) so a runaway publisher cannot exhaust head memory
+// with an unbounded request.
+const maxRequestBodyBytes = 100 * 1024 * 1024
+
+// Start has no background work: the store is populated by the HTTP handlers.
+//
+// Unlike GcsTaskManager and the Python TaskEventManager, no reconciliation
+// against the GCS worker-delta/job channels is wired up yet, so attempts
+// whose worker crashes or whose driver exits stay RUNNING in query results
+// until they are evicted.
 func (h *TaskEventsHead) Start(ctx context.Context) error {
-	go func() {
-		<-ctx.Done()
-	}()
 	return nil
 }
 
@@ -95,7 +103,7 @@ func (h *TaskEventsHead) NumStored() int {
 }
 
 func (h *TaskEventsHead) handleAddTaskEvents(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodyBytes))
 	if err != nil {
 		http.Error(w, "failed to read request body", http.StatusBadRequest)
 		return
@@ -119,7 +127,7 @@ func (h *TaskEventsHead) handleAddTaskEvents(w http.ResponseWriter, r *http.Requ
 }
 
 func (h *TaskEventsHead) handleQueryTaskEvents(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodyBytes))
 	if err != nil {
 		http.Error(w, "failed to read query body", http.StatusBadRequest)
 		return

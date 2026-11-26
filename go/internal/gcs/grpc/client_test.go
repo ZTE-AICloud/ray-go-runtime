@@ -40,11 +40,11 @@ type fakeGCS struct {
 	proto.UnimplementedRayEventExportGcsServiceServer
 	gotAddEvents *proto.AddEventsRequest
 	addEventsErr error
-	kvValue    []byte
-	kvNotFound bool
-	kvErr      error
-	gotPub     *proto.GcsPublishRequest
-	gotMD      metadata.MD
+	kvValue      []byte
+	kvNotFound   bool
+	kvErr        error
+	gotPub       *proto.GcsPublishRequest
+	gotMD        metadata.MD
 
 	// Scriptable replies for the KV write/delete/list family. A nil kvStatus
 	// means the OK status.

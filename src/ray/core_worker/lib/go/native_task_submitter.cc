@@ -238,9 +238,8 @@ extern "C" CByteArray *CNativeTaskSubmitter_CreateActor(
             for (int i = 0; i < options->label_selector_count; ++i) {
               if (options->label_selector_keys[i] != nullptr &&
                   options->label_selector_values[i] != nullptr) {
-                actor_options.label_selector.emplace(
-                    options->label_selector_keys[i],
-                    options->label_selector_values[i]);
+                actor_options.label_selector.emplace(options->label_selector_keys[i],
+                                                     options->label_selector_values[i]);
               }
             }
           }
