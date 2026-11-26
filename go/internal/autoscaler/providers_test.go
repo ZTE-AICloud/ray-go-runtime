@@ -530,3 +530,14 @@ provider:
 		_, _ = LoadYamlFile(tmpFile.Name())
 	}
 }
+
+func TestGetDefaultConfig_CloudProviders(t *testing.T) {
+	for _, provider := range []string{"aws", "gcp", "azure", "aliyun", "vsphere"} {
+		t.Run(provider, func(t *testing.T) {
+			res, err := GetDefaultConfig(map[string]interface{}{"type": provider})
+			assert.NoError(t, err)
+			assert.NotNil(t, res)
+			assert.Contains(t, res, "available_node_types")
+		})
+	}
+}

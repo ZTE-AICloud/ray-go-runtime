@@ -223,3 +223,15 @@ func TestPollErrors_ReturnsAndClears(t *testing.T) {
 	assert.Len(t, errs, 2)
 	assert.Empty(t, provider.PollErrors())
 }
+
+func TestClusterState_CreatesLockFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("RAY_TMPDIR", tmpDir)
+	providerConfig := map[string]interface{}{
+		"head_ip":    "127.0.0.1",
+		"worker_ips": toInterfaceSlice([]string{"127.0.0.2"}),
+	}
+	provider, err := NewLocalProvider("lock-test", providerConfig)
+	assert.NoError(t, err)
+	assert.FileExists(t, provider.state.lockPath)
+}

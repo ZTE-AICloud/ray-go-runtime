@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 
 	"github.com/ray-project/ray/go/internal/autoscaler"
 	"github.com/ray-project/ray/go/internal/autoscaler/local"
@@ -62,13 +63,29 @@ type localNodeInfo struct {
 // ($RAY_TMPDIR/cluster-<cluster_name>.state), corresponding to Python
 // local/node_provider.py::ClusterState: the node set is derived from the
 // provider config (head_ip + worker_ips), node liveness is persisted in the
-// state file. Concurrency is guarded by an in-process mutex; the Python-side
-// file lock (multi-process, shared with the ray CLI) is not implemented yet.
+// state file. Concurrency is guarded by both an in-process mutex and a
+// multi-process flock on <savePath>.lock shared with external writers.
 type ClusterState struct {
 	mu        sync.Mutex
 	savePath  string
+	lockPath  string
 	headIP    string
 	workerIPs []string
+}
+
+func withFileLock(lockPath string, fn func() error) error {
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return fmt.Errorf("failed to open cluster state lock file %s: %w", lockPath, err)
+	}
+	defer f.Close()
+
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("failed to flock %s: %w", lockPath, err)
+	}
+	defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
+
+	return fn()
 }
 
 // NewClusterState loads or initializes the cluster state file:
@@ -83,77 +100,93 @@ func NewClusterState(savePath, headIP string, workerIPs []string) (*ClusterState
 		return nil, fmt.Errorf("failed to create cluster state dir: %w", err)
 	}
 
-	state := &ClusterState{savePath: savePath, headIP: headIP, workerIPs: workerIPs}
-
-	workers := make(map[string]localNodeInfo)
-	if data, err := os.ReadFile(savePath); err == nil {
-		if err := json.Unmarshal(data, &workers); err != nil {
-			return nil, fmt.Errorf("failed to parse cluster state file %s: %w", savePath, err)
-		}
-		if head, ok := workers[headIP]; !ok || head.Tags[tagRayNodeKind] != nodeKindTagHead {
-			workers = make(map[string]localNodeInfo)
-			log.Log.Info("Head IP changed - recreating cluster.")
-		}
-	} else if !os.IsNotExist(err) {
-		return nil, fmt.Errorf("failed to read cluster state file %s: %w", savePath, err)
+	state := &ClusterState{
+		savePath:  savePath,
+		lockPath:  savePath + ".lock",
+		headIP:    headIP,
+		workerIPs: workerIPs,
 	}
-	log.Log.V(1).Info("ClusterState: loaded cluster state.", "path", savePath, "numNodes", len(workers))
 
-	for _, workerIP := range workerIPs {
-		if info, ok := workers[workerIP]; ok {
-			if info.Tags[tagRayNodeKind] != nodeKindTagWorker {
-				return nil, fmt.Errorf("node %s in cluster state file is not tagged as a worker", workerIP)
+	err := withFileLock(state.lockPath, func() error {
+		workers := make(map[string]localNodeInfo)
+		if data, err := os.ReadFile(savePath); err == nil {
+			if err := json.Unmarshal(data, &workers); err != nil {
+				return fmt.Errorf("failed to parse cluster state file %s: %w", savePath, err)
 			}
-			continue
+			if head, ok := workers[headIP]; !ok || head.Tags[tagRayNodeKind] != nodeKindTagHead {
+				workers = make(map[string]localNodeInfo)
+				log.Log.Info("Head IP changed - recreating cluster.")
+			}
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("failed to read cluster state file %s: %w", savePath, err)
 		}
-		workers[workerIP] = localNodeInfo{
-			Tags:  map[string]string{tagRayNodeKind: nodeKindTagWorker},
-			State: nodeStateTerminated,
-		}
-	}
-	if info, ok := workers[headIP]; ok {
-		if info.Tags[tagRayNodeKind] != nodeKindTagHead {
-			return nil, fmt.Errorf("head node %s in cluster state file is not tagged as head", headIP)
-		}
-	} else {
-		workers[headIP] = localNodeInfo{
-			Tags:  map[string]string{tagRayNodeKind: nodeKindTagHead},
-			State: nodeStateTerminated,
-		}
-	}
+		log.Log.V(1).Info("ClusterState: loaded cluster state.", "path", savePath, "numNodes", len(workers))
 
-	// Drop nodes no longer present in the provider config
-	// (e.g. the user reduced the number of workers).
-	for nodeIP := range workers {
-		if nodeIP != headIP && !containsString(workerIPs, nodeIP) {
-			delete(workers, nodeIP)
+		for _, workerIP := range workerIPs {
+			if info, ok := workers[workerIP]; ok {
+				if info.Tags[tagRayNodeKind] != nodeKindTagWorker {
+					return fmt.Errorf("node %s in cluster state file is not tagged as a worker", workerIP)
+				}
+				continue
+			}
+			workers[workerIP] = localNodeInfo{
+				Tags:  map[string]string{tagRayNodeKind: nodeKindTagWorker},
+				State: nodeStateTerminated,
+			}
 		}
-	}
+		if info, ok := workers[headIP]; ok {
+			if info.Tags[tagRayNodeKind] != nodeKindTagHead {
+				return fmt.Errorf("head node %s in cluster state file is not tagged as head", headIP)
+			}
+		} else {
+			workers[headIP] = localNodeInfo{
+				Tags:  map[string]string{tagRayNodeKind: nodeKindTagHead},
+				State: nodeStateTerminated,
+			}
+		}
 
-	if err := state.persist(workers); err != nil {
+		// Drop nodes no longer present in the provider config
+		// (e.g. the user reduced the number of workers).
+		for nodeIP := range workers {
+			if nodeIP != headIP && !containsString(workerIPs, nodeIP) {
+				delete(workers, nodeIP)
+			}
+		}
+
+		return state.persist(workers)
+	})
+	if err != nil {
 		return nil, err
 	}
 	return state, nil
 }
 
-// get returns a snapshot of the whole state, re-reading the file to stay
-// consistent with external writers (aligned with Python ClusterState.get).
+// get returns a snapshot of the whole state, re-reading the file under the
+// multi-process file lock to stay consistent with external writers.
 func (s *ClusterState) get() (map[string]localNodeInfo, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.read()
+	var workers map[string]localNodeInfo
+	err := withFileLock(s.lockPath, func() error {
+		var rerr error
+		workers, rerr = s.read()
+		return rerr
+	})
+	return workers, err
 }
 
-// update applies fn to the state in a single read-modify-write cycle.
+// update applies fn to the state in a single locked read-modify-write cycle.
 func (s *ClusterState) update(fn func(workers map[string]localNodeInfo)) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	workers, err := s.read()
-	if err != nil {
-		return err
-	}
-	fn(workers)
-	return s.persist(workers)
+	return withFileLock(s.lockPath, func() error {
+		workers, err := s.read()
+		if err != nil {
+			return err
+		}
+		fn(workers)
+		return s.persist(workers)
+	})
 }
 
 // read loads the state file; the caller must hold s.mu.
@@ -169,14 +202,18 @@ func (s *ClusterState) read() (map[string]localNodeInfo, error) {
 	return workers, nil
 }
 
-// persist writes the state file; the caller must hold s.mu.
+// persist writes the state file atomically; the caller must hold s.mu and the file lock.
 func (s *ClusterState) persist(workers map[string]localNodeInfo) error {
 	data, err := json.Marshal(workers)
 	if err != nil {
 		return fmt.Errorf("failed to serialize cluster state: %w", err)
 	}
-	if err := os.WriteFile(s.savePath, data, 0o644); err != nil {
-		return fmt.Errorf("failed to write cluster state file %s: %w", s.savePath, err)
+	tmpPath := s.savePath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
+		return fmt.Errorf("failed to write temp cluster state file %s: %w", tmpPath, err)
+	}
+	if err := os.Rename(tmpPath, s.savePath); err != nil {
+		return fmt.Errorf("failed to rename cluster state file %s: %w", s.savePath, err)
 	}
 	return nil
 }

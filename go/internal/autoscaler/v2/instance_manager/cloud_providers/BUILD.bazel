@@ -17,6 +17,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "cloud_providers",
     srcs = [
+        "kuberay_provider.go",
         "local_provider.go",
         "readonly_provider.go",
     ],
@@ -56,6 +57,7 @@ go_test(
 go_test(
     name = "cloud_providers_test",
     srcs = [
+        "kuberay_provider_test.go",
         "local_provider_test.go",
         "readonly_provider_test.go",
     ],
@@ -65,5 +67,6 @@ go_test(
         "//go/pkg/gcs",
         "//go/proto",
         "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
     ],
 )
