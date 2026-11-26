@@ -536,20 +536,16 @@ def ray_deps_setup():
         strip_prefix = None,
     )
 
-    auto_http_archive(
-        name = "rules_proto",
-        sha256 = "6fb6767d1bef535310547e03247f7518b03487740c11b6c6adb7952033fe1295",
-        url = "https://github.com/bazelbuild/rules_proto/releases/download/6.0.2/rules_proto-6.0.2.tar.gz",
-    )
+    # rules_proto is deliberately NOT re-declared here: the Bazel 8.8.1
+    # upgrade moved the repo to rules_proto 7.1.0 (declared above, before
+    # grpc_deps()); an earlier 6.0.2 pin in this block re-shadowed that repo
+    # and broke WORKSPACE-mode builds at repository resolution.
 
-    auto_http_archive(
-        name = "bazel_features",
-        sha256 = "0f23d75c7623d6dba1fd30513a94860447de87c8824570521fcc966eda3151c2",
-        url = "https://github.com/bazel-contrib/bazel_features/releases/download/v1.4.1/bazel_features-v1.4.1.tar.gz",
-        # The release tarball's top-level directory drops the leading "v";
-        # auto-deduction from the URL filename would keep it.
-        strip_prefix = "bazel_features-1.4.1",
-    )
+    # bazel_features is deliberately NOT declared here: the Bazel 8.8.1
+    # upgrade made rules_java_dependencies() supply bazel_features 1.30.0, and
+    # rules_java's rules require it (an earlier 1.4.1 pin declared in this
+    # function shadowed that repo and broke every WORKSPACE-mode build at
+    # repository resolution).
 
     auto_http_archive(
         name = "jemalloc",
