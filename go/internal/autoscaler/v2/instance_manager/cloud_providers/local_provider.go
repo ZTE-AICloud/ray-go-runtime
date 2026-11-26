@@ -275,13 +275,15 @@ func NewLocalProvider(clusterName string, providerConfig map[string]interface{})
 	}, nil
 }
 
-// localStatePath returns $RAY_TMPDIR/cluster-<cluster_name>.state,
-// aligned with python local/config.py::get_state_path
-// (ray temp dir defaults to /tmp/ray).
+// localStatePath returns <temp>/ray/cluster-<cluster_name>.state, aligned
+// with python get_default_ray_temp_dir (RAY_TMPDIR, else the system temp dir
+// via os.TempDir, then the ray subdir) and local/config.py::get_state_path, so
+// the Go autoscaler and the Python ray CLI resolve the same state and lock
+// files.
 func localStatePath(clusterName string) string {
 	tmpDir := os.Getenv("RAY_TMPDIR")
 	if tmpDir == "" {
-		tmpDir = "/tmp/ray"
+		tmpDir = filepath.Join(os.TempDir(), "ray")
 	}
 	return filepath.Join(tmpDir, fmt.Sprintf("cluster-%s.state", clusterName))
 }

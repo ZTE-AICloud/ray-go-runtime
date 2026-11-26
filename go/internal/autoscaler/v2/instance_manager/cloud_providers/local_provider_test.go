@@ -235,3 +235,17 @@ func TestClusterState_CreatesLockFile(t *testing.T) {
 	assert.NoError(t, err)
 	assert.FileExists(t, provider.state.lockPath)
 }
+
+// TestLocalStatePath_MatchesPythonTempDirResolution pins the state path
+// layout against python get_default_ray_temp_dir: RAY_TMPDIR wins; otherwise
+// the system temp dir (TMPDIR on Linux, via os.TempDir) carries the ray
+// subdir, so the Go autoscaler and the Python ray CLI agree on the file even
+// when only TMPDIR is set.
+func TestLocalStatePath_MatchesPythonTempDirResolution(t *testing.T) {
+	t.Setenv("RAY_TMPDIR", "")
+	t.Setenv("TMPDIR", "/custom-tmp")
+	assert.Equal(t, filepath.Join(os.TempDir(), "ray", "cluster-c1.state"), localStatePath("c1"))
+
+	t.Setenv("RAY_TMPDIR", "/ray-tmp")
+	assert.Equal(t, filepath.Join("/ray-tmp", "cluster-c1.state"), localStatePath("c1"))
+}
