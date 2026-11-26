@@ -85,7 +85,7 @@ type kubeRayPodList struct {
 type jsonPatchOp struct {
 	Op    string `json:"op"`
 	Path  string `json:"path"`
-	Value any    `json:"value,omitempty"`
+	Value any    `json:"value"`
 }
 
 // KubeRayProvider implements autoscaler.ICloudInstanceProvider by reading
@@ -188,9 +188,11 @@ func (p *KubeRayProvider) doJSON(ctx context.Context, method, path, contentType 
 		req.Header.Set("Content-Type", contentType)
 	}
 	if p.tokenPath != "" {
-		if b, err := os.ReadFile(p.tokenPath); err == nil {
-			req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(b)))
+		b, err := os.ReadFile(p.tokenPath)
+		if err != nil {
+			return fmt.Errorf("read service account token: %w", err)
 		}
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(b)))
 	}
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
@@ -253,9 +255,16 @@ func (p *KubeRayProvider) GetNonTerminated() (map[string]autoscaler.CloudInstanc
 		if pod.Metadata.DeletionTimestamp != "" {
 			continue
 		}
-		kind := proto.NodeKind_WORKER
-		if pod.Metadata.Labels[kubeRayLabelNodeKind] == "head" {
+		var kind proto.NodeKind
+		switch pod.Metadata.Labels[kubeRayLabelNodeKind] {
+		case "head":
 			kind = proto.NodeKind_HEAD
+		case "worker":
+			kind = proto.NodeKind_WORKER
+		default:
+			// Non-Ray pods (e.g. KubeRay's redis-cleanup job) carry the cluster
+			// label as well; skip them like the Python provider does.
+			continue
 		}
 		nodeType := pod.Metadata.Labels[kubeRayLabelGroup]
 		if nodeType == "" && kind == proto.NodeKind_HEAD {
@@ -352,7 +361,20 @@ func (p *KubeRayProvider) Launch(shape map[string]int, requestID string) error {
 	}
 	livePods, err := p.GetNonTerminated()
 	if err != nil {
+		for nt, cnt := range shape {
+			p.recordError(&autoscaler.LaunchNodeError{
+				CloudInstanceProviderError: autoscaler.CloudInstanceProviderError{Msg: err.Error(), TimestampNs: time.Now().UnixNano()},
+				NodeType:                   nt, Count: cnt, RequestId: requestID, Cause: err,
+			})
+		}
 		return err
+	}
+
+	unmatched := make(map[string]int, len(shape))
+	for nt, cnt := range shape {
+		if cnt > 0 {
+			unmatched[nt] = cnt
+		}
 	}
 
 	var patches []jsonPatchOp
@@ -369,13 +391,14 @@ func (p *KubeRayProvider) Launch(shape map[string]int, requestID string) error {
 		}
 		if wg.ScaleStrategy != nil && len(wg.ScaleStrategy.WorkersToDelete) > 0 {
 			patches = append(patches, jsonPatchOp{
-				Op:    "replace",
+				Op:    "add",
 				Path:  fmt.Sprintf("/spec/workerGroupSpecs/%d/scaleStrategy/workersToDelete", idx),
 				Value: []string{},
 			})
 		}
 
 		addCount := shape[wg.GroupName]
+		delete(unmatched, wg.GroupName)
 		if addCount <= 0 {
 			continue
 		}
@@ -400,11 +423,24 @@ func (p *KubeRayProvider) Launch(shape map[string]int, requestID string) error {
 		}
 		if desired != curReplicas {
 			patches = append(patches, jsonPatchOp{
-				Op:    "replace",
+				Op:    "add",
 				Path:  fmt.Sprintf("/spec/workerGroupSpecs/%d/replicas", idx),
 				Value: desired,
 			})
 		}
+	}
+
+	for nt, cnt := range unmatched {
+		p.recordError(&autoscaler.LaunchNodeError{
+			CloudInstanceProviderError: autoscaler.CloudInstanceProviderError{
+				Msg:         fmt.Sprintf("unknown worker group %q in RayCluster", nt),
+				TimestampNs: time.Now().UnixNano(),
+			},
+			NodeType:  nt,
+			Count:     cnt,
+			RequestId: requestID,
+			Cause:     fmt.Errorf("unknown worker group %q", nt),
+		})
 	}
 
 	if len(patches) > 0 {
@@ -442,6 +478,12 @@ func (p *KubeRayProvider) Terminate(ids []string, requestID string) error {
 	}
 	livePods, err := p.GetNonTerminated()
 	if err != nil {
+		for _, id := range ids {
+			p.recordError(&autoscaler.TerminateNodeError{
+				CloudInstanceProviderError: autoscaler.CloudInstanceProviderError{Msg: err.Error(), TimestampNs: time.Now().UnixNano()},
+				CloudInstanceId:            id, RequestId: requestID, Cause: err,
+			})
+		}
 		return err
 	}
 
@@ -472,16 +514,37 @@ func (p *KubeRayProvider) Terminate(ids []string, requestID string) error {
 		}
 		numHosts := workerGroupNumHosts(wg)
 		curReplicas := workerGroupReplicas(wg)
-		desired := curReplicas - (len(toDel)+numHosts-1)/numHosts
 		minRep := 0
 		if wg.MinReplicas != nil {
 			minRep = *wg.MinReplicas
 		}
+		maxDeletable := (curReplicas - minRep) * numHosts
+		if maxDeletable < 0 {
+			maxDeletable = 0
+		}
+		if len(toDel) > maxDeletable {
+			for _, id := range toDel[maxDeletable:] {
+				p.recordError(&autoscaler.TerminateNodeError{
+					CloudInstanceProviderError: autoscaler.CloudInstanceProviderError{
+						Msg:         "Terminate capped by minReplicas limit.",
+						TimestampNs: time.Now().UnixNano(),
+					},
+					CloudInstanceId: id,
+					RequestId:       requestID,
+					Cause:           fmt.Errorf("minReplicas=%d reached", minRep),
+				})
+			}
+			toDel = toDel[:maxDeletable]
+		}
+		if len(toDel) == 0 {
+			continue
+		}
+		desired := curReplicas - (len(toDel)+numHosts-1)/numHosts
 		if desired < minRep {
 			desired = minRep
 		}
 		patches = append(patches, jsonPatchOp{
-			Op:    "replace",
+			Op:    "add",
 			Path:  fmt.Sprintf("/spec/workerGroupSpecs/%d/replicas", idx),
 			Value: desired,
 		})
@@ -493,7 +556,7 @@ func (p *KubeRayProvider) Terminate(ids []string, requestID string) error {
 			})
 		} else {
 			patches = append(patches, jsonPatchOp{
-				Op:    "replace",
+				Op:    "add",
 				Path:  fmt.Sprintf("/spec/workerGroupSpecs/%d/scaleStrategy/workersToDelete", idx),
 				Value: toDel,
 			})

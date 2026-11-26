@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -100,9 +101,11 @@ func NewClusterState(savePath, headIP string, workerIPs []string) (*ClusterState
 		return nil, fmt.Errorf("failed to create cluster state dir: %w", err)
 	}
 
+	// Must match python local/config.py::get_lock_path (cluster-<name>.lock),
+	// which guards the same cluster-<name>.state file from the ray CLI.
 	state := &ClusterState{
 		savePath:  savePath,
-		lockPath:  savePath + ".lock",
+		lockPath:  strings.TrimSuffix(savePath, ".state") + ".lock",
 		headIP:    headIP,
 		workerIPs: workerIPs,
 	}
