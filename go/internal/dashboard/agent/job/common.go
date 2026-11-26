@@ -144,7 +144,6 @@ type JobInfo struct {
 	EntrypointNumGPUs      *float64           `json:"entrypoint_num_gpus"`
 	EntrypointMemory       *uint64            `json:"entrypoint_memory"`
 	EntrypointResources    map[string]float64 `json:"entrypoint_resources"`
-	EntrypointLabelSelector map[string]string `json:"entrypoint_label_selector,omitempty"`
 	DriverAgentHTTPAddress *string            `json:"driver_agent_http_address"`
 	DriverNodeID           *string            `json:"driver_node_id"`
 	DriverExitCode         *int32             `json:"driver_exit_code"`

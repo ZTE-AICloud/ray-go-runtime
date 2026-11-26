@@ -428,12 +428,12 @@ func redactEnvVarsMap(runtimeEnv map[string]any) {
 func redactSerializedRuntimeEnvJSON(raw string) string {
 	var parsed map[string]any
 	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
-		return raw
+		return redactedPlaceholder
 	}
 	redactEnvVarsMap(parsed)
 	out, err := json.Marshal(parsed)
 	if err != nil {
-		return raw
+		return redactedPlaceholder
 	}
 	return string(out)
 }

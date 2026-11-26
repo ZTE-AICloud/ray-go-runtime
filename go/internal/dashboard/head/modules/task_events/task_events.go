@@ -41,7 +41,7 @@ type TaskEventsHead struct {
 // New creates a TaskEventsHead module.
 func New(cfg *head.HeadConfig, client *head.GCSClient) *TaskEventsHead {
 	maxItems := defaultMaxNumTaskEvents
-	if v := strings.TrimSpace(os.Getenv("RAY_task_events_max_num_task_events_in_gcs")); v != "" {
+	if v := strings.TrimSpace(os.Getenv("RAY_task_events_max_num_task_in_gcs")); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			maxItems = n
 		}

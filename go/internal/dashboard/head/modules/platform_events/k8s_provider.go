@@ -47,10 +47,11 @@ type k8sWatchLine struct {
 }
 
 type k8sObjectMeta struct {
-	UID             string `json:"uid"`
-	Name            string `json:"name"`
-	Namespace       string `json:"namespace"`
-	ResourceVersion string `json:"resourceVersion"`
+	UID             string            `json:"uid"`
+	Name            string            `json:"name"`
+	Namespace       string            `json:"namespace"`
+	ResourceVersion string            `json:"resourceVersion"`
+	Labels          map[string]string `json:"labels"`
 }
 
 type k8sPod struct {
@@ -80,7 +81,19 @@ type k8sEvent struct {
 }
 
 type k8sPodList struct {
+	Metadata struct {
+		ResourceVersion string `json:"resourceVersion"`
+	} `json:"metadata"`
 	Items []k8sPod `json:"items"`
+}
+
+type k8sStatusError struct {
+	path   string
+	status int
+}
+
+func (e *k8sStatusError) Error() string {
+	return fmt.Sprintf("k8s api %s status %d", e.path, e.status)
 }
 
 type k8sEventList struct {
@@ -102,6 +115,7 @@ type KubernetesEventProvider struct {
 
 	mu          sync.RWMutex
 	clusterPods map[string]struct{}
+	lastEventRV string
 }
 
 // NewInClusterKubernetesEventProvider creates a provider configured from the
@@ -133,7 +147,13 @@ func NewInClusterKubernetesEventProvider(callback func(*proto.RayEvent)) (*Kuber
 
 	client := &http.Client{
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+			DialContext: (&net.Dialer{
+				Timeout:   10 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second,
+			TLSClientConfig:       &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
 		},
 	}
 
@@ -153,7 +173,7 @@ func NewInClusterKubernetesEventProvider(callback func(*proto.RayEvent)) (*Kuber
 func (p *KubernetesEventProvider) Run(ctx context.Context) {
 	// Seed pod membership before consuming namespace events so initial events
 	// for existing pods are not dropped by isClusterObject.
-	if err := p.listClusterPods(ctx); err != nil && ctx.Err() == nil {
+	if _, err := p.listClusterPods(ctx); err != nil && ctx.Err() == nil {
 		log.Log.Error(err, "k8s initial pod list failed; pod events may be dropped until watch syncs")
 	}
 
@@ -219,23 +239,23 @@ func (p *KubernetesEventProvider) doRequest(ctx context.Context, path string) (i
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		resp.Body.Close()
-		return nil, fmt.Errorf("k8s api %s status %d", path, resp.StatusCode)
+		return nil, &k8sStatusError{path: path, status: resp.StatusCode}
 	}
 	return resp.Body, nil
 }
 
-func (p *KubernetesEventProvider) listClusterPods(ctx context.Context) error {
+func (p *KubernetesEventProvider) listClusterPods(ctx context.Context) (string, error) {
 	labelSel := url.QueryEscape(fmt.Sprintf("%s=%s", k8sClusterLabelKey, p.clusterName))
 	path := fmt.Sprintf("/api/v1/namespaces/%s/pods?labelSelector=%s&resourceVersion=0", url.PathEscape(p.namespace), labelSel)
 	body, err := p.doRequest(ctx, path)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer body.Close()
 
 	var listResp k8sPodList
 	if err := json.NewDecoder(body).Decode(&listResp); err != nil {
-		return err
+		return "", err
 	}
 	nextPods := make(map[string]struct{}, len(listResp.Items))
 	for _, pod := range listResp.Items {
@@ -246,7 +266,7 @@ func (p *KubernetesEventProvider) listClusterPods(ctx context.Context) error {
 	p.mu.Lock()
 	p.clusterPods = nextPods
 	p.mu.Unlock()
-	return nil
+	return listResp.Metadata.ResourceVersion, nil
 }
 
 func (p *KubernetesEventProvider) latestEventsResourceVersion(ctx context.Context) (string, error) {
@@ -265,48 +285,12 @@ func (p *KubernetesEventProvider) latestEventsResourceVersion(ctx context.Contex
 }
 
 func (p *KubernetesEventProvider) watchPods(ctx context.Context) error {
+	rv, err := p.listClusterPods(ctx)
+	if err != nil {
+		return err
+	}
 	labelSel := url.QueryEscape(fmt.Sprintf("%s=%s", k8sClusterLabelKey, p.clusterName))
 	path := fmt.Sprintf("/api/v1/namespaces/%s/pods?watch=true&labelSelector=%s", url.PathEscape(p.namespace), labelSel)
-	body, err := p.doRequest(ctx, path)
-	if err != nil {
-		return err
-	}
-	defer body.Close()
-
-	// Fresh watch without resourceVersion replays a full snapshot; reset map
-	// so pods deleted during a disconnect gap are pruned.
-	p.mu.Lock()
-	p.clusterPods = make(map[string]struct{})
-	p.mu.Unlock()
-
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for scanner.Scan() {
-		var line k8sWatchLine
-		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
-			continue
-		}
-		var pod k8sPod
-		if err := json.Unmarshal(line.Object, &pod); err != nil || pod.Metadata.Name == "" {
-			continue
-		}
-		p.mu.Lock()
-		if strings.EqualFold(line.Type, "DELETED") {
-			delete(p.clusterPods, pod.Metadata.Name)
-		} else {
-			p.clusterPods[pod.Metadata.Name] = struct{}{}
-		}
-		p.mu.Unlock()
-	}
-	return scanner.Err()
-}
-
-func (p *KubernetesEventProvider) watchEvents(ctx context.Context) error {
-	rv, err := p.latestEventsResourceVersion(ctx)
-	if err != nil {
-		return err
-	}
-	path := fmt.Sprintf("/api/v1/namespaces/%s/events?watch=true", url.PathEscape(p.namespace))
 	if rv != "" {
 		path += "&resourceVersion=" + url.QueryEscape(rv)
 	}
@@ -324,34 +308,117 @@ func (p *KubernetesEventProvider) watchEvents(ctx context.Context) error {
 			continue
 		}
 		if strings.EqualFold(line.Type, "ERROR") {
+			return fmt.Errorf("k8s pods watch returned ERROR; relisting")
+		}
+		var pod k8sPod
+		if err := json.Unmarshal(line.Object, &pod); err != nil || pod.Metadata.Name == "" {
+			continue
+		}
+		p.mu.Lock()
+		if strings.EqualFold(line.Type, "DELETED") {
+			delete(p.clusterPods, pod.Metadata.Name)
+		} else {
+			p.clusterPods[pod.Metadata.Name] = struct{}{}
+		}
+		p.mu.Unlock()
+	}
+	return scanner.Err()
+}
+
+func (p *KubernetesEventProvider) watchEvents(ctx context.Context) error {
+	if p.lastEventRV == "" {
+		rv, err := p.latestEventsResourceVersion(ctx)
+		if err != nil {
+			return err
+		}
+		p.lastEventRV = rv
+	}
+	path := fmt.Sprintf(
+		"/api/v1/namespaces/%s/events?watch=true&fieldSelector=%s",
+		url.PathEscape(p.namespace),
+		url.QueryEscape("involvedObject.kind=Pod"),
+	)
+	if p.lastEventRV != "" {
+		path += "&resourceVersion=" + url.QueryEscape(p.lastEventRV)
+	}
+	body, err := p.doRequest(ctx, path)
+	if err != nil {
+		if statusErr, ok := err.(*k8sStatusError); ok && statusErr.status == http.StatusGone {
+			p.lastEventRV = ""
+		}
+		return err
+	}
+	defer body.Close()
+
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		var line k8sWatchLine
+		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
+			continue
+		}
+		if strings.EqualFold(line.Type, "ERROR") {
+			p.lastEventRV = ""
 			return fmt.Errorf("k8s events watch returned ERROR; relisting")
 		}
 		var ev k8sEvent
 		if err := json.Unmarshal(line.Object, &ev); err != nil {
 			continue
 		}
-		if rayEv := p.convertK8sEvent(&ev); rayEv != nil {
+		if ev.Metadata.ResourceVersion != "" {
+			p.lastEventRV = ev.Metadata.ResourceVersion
+		}
+		if rayEv := p.convertK8sEvent(ctx, &ev); rayEv != nil {
 			p.callback(rayEv)
 		}
 	}
 	return scanner.Err()
 }
 
-func (p *KubernetesEventProvider) isClusterObject(kind, name string) bool {
+func (p *KubernetesEventProvider) resolveClusterPod(ctx context.Context, name string) bool {
+	if name == "" {
+		return false
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	path := fmt.Sprintf("/api/v1/namespaces/%s/pods/%s", url.PathEscape(p.namespace), url.PathEscape(name))
+	body, err := p.doRequest(reqCtx, path)
+	if err != nil {
+		return false
+	}
+	defer body.Close()
+
+	var pod k8sPod
+	if err := json.NewDecoder(body).Decode(&pod); err != nil {
+		return false
+	}
+	if pod.Metadata.Labels[k8sClusterLabelKey] != p.clusterName {
+		return false
+	}
+	p.mu.Lock()
+	p.clusterPods[name] = struct{}{}
+	p.mu.Unlock()
+	return true
+}
+
+func (p *KubernetesEventProvider) isClusterObject(ctx context.Context, kind, name string) bool {
 	if kind == "Pod" {
 		p.mu.RLock()
 		_, ok := p.clusterPods[name]
 		p.mu.RUnlock()
-		return ok
+		if ok {
+			return true
+		}
+		return p.resolveClusterPod(ctx, name)
 	}
 	return kind == "RayCluster" && name == p.clusterName
 }
 
-func (p *KubernetesEventProvider) convertK8sEvent(ev *k8sEvent) *proto.RayEvent {
+func (p *KubernetesEventProvider) convertK8sEvent(ctx context.Context, ev *k8sEvent) *proto.RayEvent {
 	if ev.Metadata.UID == "" {
 		return nil
 	}
-	if !p.isClusterObject(ev.InvolvedObject.Kind, ev.InvolvedObject.Name) {
+	if !p.isClusterObject(ctx, ev.InvolvedObject.Kind, ev.InvolvedObject.Name) {
 		return nil
 	}
 

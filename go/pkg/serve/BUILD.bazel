@@ -5,6 +5,7 @@ go_library(
     srcs = ["client.go"],
     importpath = "github.com/ray-project/ray/go/pkg/serve",
     visibility = ["//visibility:public"],
+    deps = ["//go/internal/dashboard/auth"],
 )
 
 go_test(

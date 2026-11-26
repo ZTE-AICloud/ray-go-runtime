@@ -96,3 +96,23 @@ func TestJobClientLifecycle(t *testing.T) {
 		t.Fatalf("DeleteJob = (%v, %v)", deleted, err)
 	}
 }
+
+func TestJobClientPropagatesAuthToken(t *testing.T) {
+	t.Setenv("RAY_AUTH_MODE", "token")
+	t.Setenv("RAY_AUTH_TOKEN", "secret-job-token")
+
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_ = json.NewEncoder(w).Encode([]JobDetails{})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, srv.Client())
+	if _, err := c.ListJobs(context.Background()); err != nil {
+		t.Fatalf("ListJobs: %v", err)
+	}
+	if gotAuth != "Bearer secret-job-token" {
+		t.Fatalf("Authorization = %q, want Bearer secret-job-token", gotAuth)
+	}
+}

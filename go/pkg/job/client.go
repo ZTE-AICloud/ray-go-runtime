@@ -28,6 +28,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/ray-project/ray/go/internal/dashboard/auth"
 )
 
 const defaultDashboardAddress = "http://127.0.0.1:8265"
@@ -226,6 +228,11 @@ func (c *Client) WaitForCompletion(ctx context.Context, id string, pollInterval 
 }
 
 func (c *Client) doJSON(req *http.Request, dst any) error {
+	if req.Header.Get("Authorization") == "" {
+		if token, ok := auth.RequestToken(); ok {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err

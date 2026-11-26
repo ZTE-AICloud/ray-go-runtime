@@ -94,3 +94,35 @@ func TestServeClientControlAndInference(t *testing.T) {
 		t.Fatalf("Delete: %v", err)
 	}
 }
+
+func TestServeClientPropagatesAuthToken(t *testing.T) {
+	t.Setenv("RAY_AUTH_MODE", "token")
+	t.Setenv("RAY_AUTH_TOKEN", "secret-serve-token")
+
+	var gotDashAuth, gotProxyAuth string
+	dashSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotDashAuth = r.Header.Get("Authorization")
+		_ = json.NewEncoder(w).Encode(VersionResponse{Version: "2", RayVersion: "3.0.0.dev0"})
+	}))
+	defer dashSrv.Close()
+
+	proxySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotProxyAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer proxySrv.Close()
+
+	c := NewClient(dashSrv.URL, dashSrv.Client()).WithProxyURL(proxySrv.URL)
+	if _, err := c.Version(context.Background()); err != nil {
+		t.Fatalf("Version: %v", err)
+	}
+	if gotDashAuth != "Bearer secret-serve-token" {
+		t.Fatalf("dashboard Authorization = %q, want Bearer secret-serve-token", gotDashAuth)
+	}
+	if _, _, err := c.Call(context.Background(), http.MethodGet, "/predict", nil, nil); err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if gotProxyAuth != "Bearer secret-serve-token" {
+		t.Fatalf("proxy Authorization = %q, want Bearer secret-serve-token", gotProxyAuth)
+	}
+}

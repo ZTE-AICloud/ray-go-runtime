@@ -16,6 +16,7 @@ package task_events
 
 import (
 	"container/list"
+	"sort"
 	"strings"
 	"sync"
 
@@ -23,7 +24,10 @@ import (
 	gproto "google.golang.org/protobuf/proto"
 )
 
-const defaultMaxNumTaskEvents = 100000
+const (
+	defaultMaxNumTaskEvents    = 100000
+	maxProfileEventsPerAttempt = 1000
+)
 
 type taskAttemptKey struct {
 	taskID  string // raw binary string
@@ -35,6 +39,7 @@ type storedTaskEvent struct {
 	jobID string
 	event *proto.TaskEvents
 	elem  *list.Element
+	seq   uint64
 }
 
 // TaskEventStore is a bounded, thread-safe in-memory store for TaskEvents,
@@ -43,10 +48,12 @@ type TaskEventStore struct {
 	mu       sync.RWMutex
 	maxItems int
 
-	byAttempt map[taskAttemptKey]*storedTaskEvent
-	byTask    map[string]map[int32]*storedTaskEvent
-	byJob     map[string]map[taskAttemptKey]*storedTaskEvent
-	lru       *list.List // oldest at front, newest at back
+	byAttempt       map[taskAttemptKey]*storedTaskEvent
+	byTask          map[string]map[int32]*storedTaskEvent
+	byJob           map[string]map[taskAttemptKey]*storedTaskEvent
+	lru             *list.List // oldest at front, newest at back
+	nextSeq         uint64
+	droppedAttempts map[taskAttemptKey]struct{}
 
 	droppedStatusCount int64
 }
@@ -57,11 +64,12 @@ func NewTaskEventStore(maxItems int) *TaskEventStore {
 		maxItems = defaultMaxNumTaskEvents
 	}
 	return &TaskEventStore{
-		maxItems:  maxItems,
-		byAttempt: make(map[taskAttemptKey]*storedTaskEvent),
-		byTask:    make(map[string]map[int32]*storedTaskEvent),
-		byJob:     make(map[string]map[taskAttemptKey]*storedTaskEvent),
-		lru:       list.New(),
+		maxItems:        maxItems,
+		byAttempt:       make(map[taskAttemptKey]*storedTaskEvent),
+		byTask:          make(map[string]map[int32]*storedTaskEvent),
+		byJob:           make(map[string]map[taskAttemptKey]*storedTaskEvent),
+		lru:             list.New(),
+		droppedAttempts: make(map[taskAttemptKey]struct{}),
 	}
 }
 
@@ -79,7 +87,23 @@ func (s *TaskEventStore) RecordDroppedAttempts(attempts []*proto.TaskAttempt) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.droppedStatusCount += int64(len(attempts))
+	for _, a := range attempts {
+		if a == nil {
+			continue
+		}
+		key := taskAttemptKey{
+			taskID:  string(a.GetTaskId()),
+			attempt: a.GetAttemptNumber(),
+		}
+		if rec, ok := s.byAttempt[key]; ok {
+			s.removeRecordLocked(rec)
+		}
+		if _, already := s.droppedAttempts[key]; already {
+			continue
+		}
+		s.droppedAttempts[key] = struct{}{}
+		s.droppedStatusCount++
+	}
 }
 
 // AddOrReplace merges incoming TaskEvents into the store, evicting the oldest
@@ -94,6 +118,8 @@ func (s *TaskEventStore) AddOrReplace(ev *proto.TaskEvents) {
 	key := taskAttemptKey{taskID: string(ev.GetTaskId()), attempt: ev.GetAttemptNumber()}
 	if existing, ok := s.byAttempt[key]; ok {
 		mergeTaskEvents(existing.event, ev)
+		s.nextSeq++
+		existing.seq = s.nextSeq
 		s.lru.MoveToBack(existing.elem)
 		return
 	}
@@ -103,10 +129,15 @@ func (s *TaskEventStore) AddOrReplace(ev *proto.TaskEvents) {
 	}
 
 	cloned := gproto.Clone(ev).(*proto.TaskEvents)
+	if cloned.ProfileEvents != nil && len(cloned.ProfileEvents.Events) > maxProfileEventsPerAttempt {
+		cloned.ProfileEvents.Events = cloned.ProfileEvents.Events[:maxProfileEventsPerAttempt]
+	}
+	s.nextSeq++
 	rec := &storedTaskEvent{
 		key:   key,
 		jobID: string(ev.GetJobId()),
 		event: cloned,
+		seq:   s.nextSeq,
 	}
 	rec.elem = s.lru.PushBack(rec)
 	s.byAttempt[key] = rec
@@ -124,13 +155,10 @@ func (s *TaskEventStore) AddOrReplace(ev *proto.TaskEvents) {
 	}
 }
 
-func (s *TaskEventStore) evictOldestLocked() {
-	front := s.lru.Front()
-	if front == nil {
-		return
+func (s *TaskEventStore) removeRecordLocked(rec *storedTaskEvent) {
+	if rec.elem != nil {
+		s.lru.Remove(rec.elem)
 	}
-	rec := front.Value.(*storedTaskEvent)
-	s.lru.Remove(front)
 	delete(s.byAttempt, rec.key)
 	if m := s.byTask[rec.key.taskID]; m != nil {
 		delete(m, rec.key.attempt)
@@ -146,6 +174,15 @@ func (s *TaskEventStore) evictOldestLocked() {
 			}
 		}
 	}
+}
+
+func (s *TaskEventStore) evictOldestLocked() {
+	front := s.lru.Front()
+	if front == nil {
+		return
+	}
+	rec := front.Value.(*storedTaskEvent)
+	s.removeRecordLocked(rec)
 	s.droppedStatusCount++
 }
 
@@ -170,8 +207,15 @@ func mergeTaskEvents(dst, src *proto.TaskEvents) {
 	if src.ProfileEvents != nil {
 		if dst.ProfileEvents == nil {
 			dst.ProfileEvents = gproto.Clone(src.ProfileEvents).(*proto.ProfileEvents)
-		} else {
-			dst.ProfileEvents.Events = append(dst.ProfileEvents.Events, src.ProfileEvents.Events...)
+		} else if remaining := maxProfileEventsPerAttempt - len(dst.ProfileEvents.Events); remaining > 0 {
+			toAdd := src.ProfileEvents.Events
+			if len(toAdd) > remaining {
+				toAdd = toAdd[:remaining]
+			}
+			dst.ProfileEvents.Events = append(dst.ProfileEvents.Events, toAdd...)
+		}
+		if len(dst.ProfileEvents.Events) > maxProfileEventsPerAttempt {
+			dst.ProfileEvents.Events = dst.ProfileEvents.Events[:maxProfileEventsPerAttempt]
 		}
 	}
 }
@@ -261,6 +305,7 @@ func (s *TaskEventStore) selectCandidatesLocked(filters *proto.GetTaskEventsRequ
 			for _, rec := range m {
 				out = append(out, rec)
 			}
+			sort.Slice(out, func(i, j int) bool { return out[i].seq > out[j].seq })
 			return out
 		}
 
@@ -277,13 +322,14 @@ func (s *TaskEventStore) selectCandidatesLocked(filters *proto.GetTaskEventsRequ
 			for _, rec := range m {
 				out = append(out, rec)
 			}
+			sort.Slice(out, func(i, j int) bool { return out[i].seq > out[j].seq })
 			return out
 		}
 	}
 
 	out := make([]*storedTaskEvent, 0, len(s.byAttempt))
-	for _, rec := range s.byAttempt {
-		out = append(out, rec)
+	for elem := s.lru.Back(); elem != nil; elem = elem.Prev() {
+		out = append(out, elem.Value.(*storedTaskEvent))
 	}
 	return out
 }

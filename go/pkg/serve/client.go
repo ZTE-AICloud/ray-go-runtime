@@ -28,6 +28,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/ray-project/ray/go/internal/dashboard/auth"
 )
 
 const (
@@ -166,6 +168,7 @@ func (c *Client) Call(ctx context.Context, method, path string, body []byte, hea
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
+	applyAuthToken(req)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return 0, nil, err
@@ -178,7 +181,16 @@ func (c *Client) Call(ctx context.Context, method, path string, body []byte, hea
 	return resp.StatusCode, respBody, nil
 }
 
+func applyAuthToken(req *http.Request) {
+	if req.Header.Get("Authorization") == "" {
+		if token, ok := auth.RequestToken(); ok {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+	}
+}
+
 func (c *Client) doEmpty(req *http.Request) error {
+	applyAuthToken(req)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
@@ -192,6 +204,7 @@ func (c *Client) doEmpty(req *http.Request) error {
 }
 
 func (c *Client) doJSON(req *http.Request, dst any) error {
+	applyAuthToken(req)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err

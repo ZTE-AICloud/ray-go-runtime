@@ -75,9 +75,9 @@ func TestPlatformEventsHeadCacheAndRoute(t *testing.T) {
 func TestKubernetesEventProviderWatchPodsAndEvents(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/namespaces/zenap/pods":
+		case "/api/v1/namespaces/test-ns/pods":
 			_, _ = w.Write([]byte(`{"type":"ADDED","object":{"metadata":{"name":"ray-head-1","uid":"p1"}}}` + "\n"))
-		case "/api/v1/namespaces/zenap/events":
+		case "/api/v1/namespaces/test-ns/events":
 			if r.URL.Query().Get("watch") == "" {
 				_, _ = w.Write([]byte(`{"metadata":{"resourceVersion":"10"}}`))
 				return
@@ -94,7 +94,7 @@ func TestKubernetesEventProviderWatchPodsAndEvents(t *testing.T) {
 	p := &KubernetesEventProvider{
 		baseURL:     srv.URL,
 		httpClient:  srv.Client(),
-		namespace:   "zenap",
+		namespace:   "test-ns",
 		clusterName: "ray-cluster",
 		clusterPods: make(map[string]struct{}),
 		callback: func(ev *proto.RayEvent) {
