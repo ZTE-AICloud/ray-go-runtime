@@ -33,13 +33,13 @@ func TestKubeRayProviderGetLaunchAndTerminate(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/zenap/pods":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/test-ns/pods":
 			_, _ = w.Write([]byte(`{"items":[
 				{"metadata":{"name":"ray-head-0","labels":{"ray.io/cluster":"rc1","ray.io/node-type":"head","ray.io/group":"headgroup"}},"status":{"phase":"Running"}},
 				{"metadata":{"name":"ray-wg1-0","labels":{"ray.io/cluster":"rc1","ray.io/node-type":"worker","ray.io/group":"wg1"}},"status":{"phase":"Running"}},
 				{"metadata":{"name":"ray-wg1-dead","labels":{"ray.io/cluster":"rc1","ray.io/node-type":"worker","ray.io/group":"wg1"}},"status":{"phase":"Succeeded"}}
 			]}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/apis/ray.io/v1/namespaces/zenap/rayclusters/rc1":
+		case r.Method == http.MethodGet && r.URL.Path == "/apis/ray.io/v1/namespaces/test-ns/rayclusters/rc1":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"spec": map[string]any{
 					"workerGroupSpecs": []map[string]any{
@@ -52,7 +52,7 @@ func TestKubeRayProviderGetLaunchAndTerminate(t *testing.T) {
 					},
 				},
 			})
-		case r.Method == http.MethodPatch && r.URL.Path == "/apis/ray.io/v1/namespaces/zenap/rayclusters/rc1":
+		case r.Method == http.MethodPatch && r.URL.Path == "/apis/ray.io/v1/namespaces/test-ns/rayclusters/rc1":
 			body, _ := io.ReadAll(r.Body)
 			var ops []jsonPatchOp
 			require.NoError(t, json.Unmarshal(body, &ops))
@@ -71,7 +71,7 @@ func TestKubeRayProviderGetLaunchAndTerminate(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := newKubeRayProviderWithClient("rc1", "zenap", srv.URL, srv.Client())
+	p := newKubeRayProviderWithClient("rc1", "test-ns", srv.URL, srv.Client())
 
 	instances, err := p.GetNonTerminated()
 	require.NoError(t, err)
@@ -97,9 +97,9 @@ func TestKubeRayProviderGetLaunchAndTerminate(t *testing.T) {
 func TestKubeRayProviderLaunchCappedByMaxReplicas(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/namespaces/zenap/pods":
+		case "/api/v1/namespaces/test-ns/pods":
 			_, _ = w.Write([]byte(`{"items":[]}`))
-		case "/apis/ray.io/v1/namespaces/zenap/rayclusters/rc1":
+		case "/apis/ray.io/v1/namespaces/test-ns/rayclusters/rc1":
 			if r.Method == http.MethodGet {
 				_, _ = w.Write([]byte(`{"spec":{"workerGroupSpecs":[{"groupName":"wg1","replicas":1,"maxReplicas":2}]}}`))
 				return
@@ -111,7 +111,7 @@ func TestKubeRayProviderLaunchCappedByMaxReplicas(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := newKubeRayProviderWithClient("rc1", "zenap", srv.URL, srv.Client())
+	p := newKubeRayProviderWithClient("rc1", "test-ns", srv.URL, srv.Client())
 	require.NoError(t, p.Launch(map[string]int{"wg1": 3}, "req-cap"))
 	errs := p.PollErrors()
 	require.Len(t, errs, 1)
