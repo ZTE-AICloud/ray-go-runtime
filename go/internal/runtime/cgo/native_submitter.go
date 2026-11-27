@@ -55,6 +55,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"sort"
 	"time"
 	"unsafe"
 
@@ -140,6 +141,9 @@ func (s *NativeTaskSubmitter) CreateActor(
 	// zero-value struct valid while keeping behavior consistent with local_mode.
 	if options != nil {
 		if err := options.ValidateMaxPendingCalls(); err != nil {
+			return ids.NilActorID(), err
+		}
+		if err := options.ValidateLabelSelector(); err != nil {
 			return ids.NilActorID(), err
 		}
 		options.NormalizeMaxPendingCalls()
@@ -444,6 +448,26 @@ func convertActorCreationOptionsToC(opts *submitter.ActorCreationOptions, actorD
 		cOpts.node_affinity_soft = C.bool(opts.NodeAffinity.Soft)
 	}
 
+	if len(opts.LabelSelector) > 0 {
+		n := len(opts.LabelSelector)
+		sortedKeys := make([]string, 0, n)
+		for k := range opts.LabelSelector {
+			sortedKeys = append(sortedKeys, k)
+		}
+		sort.Strings(sortedKeys)
+		keys := (**C.char)(C.malloc(C.size_t(n) * C.size_t(unsafe.Sizeof((*C.char)(nil)))))
+		vals := (**C.char)(C.malloc(C.size_t(n) * C.size_t(unsafe.Sizeof((*C.char)(nil)))))
+		keySlice := (*[1 << 20]*C.char)(unsafe.Pointer(keys))[:n:n]
+		valSlice := (*[1 << 20]*C.char)(unsafe.Pointer(vals))[:n:n]
+		for i, k := range sortedKeys {
+			keySlice[i] = C.CString(k)
+			valSlice[i] = C.CString(opts.LabelSelector[k])
+		}
+		cOpts.label_selector_keys = keys
+		cOpts.label_selector_values = vals
+		cOpts.label_selector_count = C.int(n)
+	}
+
 	if opts.Name != "" {
 		cOpts.name = C.CString(opts.Name)
 	}
@@ -626,6 +650,27 @@ func freeActorCreationOptions(opts *C.CActorCreationOptions) {
 	}
 	if opts.node_affinity_node_id != nil {
 		C.free(unsafe.Pointer(opts.node_affinity_node_id))
+	}
+	if opts.label_selector_count > 0 {
+		n := int(opts.label_selector_count)
+		if opts.label_selector_keys != nil {
+			keySlice := (*[1 << 20]*C.char)(unsafe.Pointer(opts.label_selector_keys))[:n:n]
+			for i := 0; i < n; i++ {
+				if keySlice[i] != nil {
+					C.free(unsafe.Pointer(keySlice[i]))
+				}
+			}
+			C.free(unsafe.Pointer(opts.label_selector_keys))
+		}
+		if opts.label_selector_values != nil {
+			valSlice := (*[1 << 20]*C.char)(unsafe.Pointer(opts.label_selector_values))[:n:n]
+			for i := 0; i < n; i++ {
+				if valSlice[i] != nil {
+					C.free(unsafe.Pointer(valSlice[i]))
+				}
+			}
+			C.free(unsafe.Pointer(opts.label_selector_values))
+		}
 	}
 	// Free concurrency group flat arrays: each group's descriptor array
 	// (per-method inner 4-element arrays), then the per-group outer arrays.

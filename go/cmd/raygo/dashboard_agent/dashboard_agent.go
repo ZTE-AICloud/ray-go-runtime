@@ -26,6 +26,7 @@ import (
 	"github.com/ray-project/ray/go/internal/common"
 	"github.com/ray-project/ray/go/internal/dashboard/agent"
 	dashboardjob "github.com/ray-project/ray/go/internal/dashboard/agent/job"
+	"github.com/ray-project/ray/go/internal/dashboard/aggregator"
 	dashboardevent "github.com/ray-project/ray/go/internal/dashboard/event"
 	"github.com/ray-project/ray/go/internal/dashboard/healthz"
 	dashboardlog "github.com/ray-project/ray/go/internal/dashboard/log"
@@ -351,7 +352,12 @@ func runDashboardAgent(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to connect to GCS client: %w", err)
 	}
-	defer gcsClient.Close()
+	closeGCS := true
+	defer func() {
+		if closeGCS {
+			gcsClient.Close()
+		}
+	}()
 
 	cfg.GCS = gcsClient
 
@@ -372,8 +378,16 @@ func runDashboardAgent(ctx context.Context) error {
 	// agent down when the raylet dies, mirroring the Python dashboard agent's
 	// create_check_raylet_task.
 	runCtx, cancel := context.WithCancel(ctx)
+	watcherDone := agent.StartParentWatcher(runCtx, cancel, cfg.LogDir, agent.ResolveErrorPublisher(*cfg))
+	defer func() {
+		if !agent.WaitParentWatcher(watcherDone, agent.ParentWatcherDrainTimeout) {
+			closeGCS = false
+			log.Log.Info("raylet death report still in flight; skipping GCS client close")
+		}
+	}()
+	// Registered after the wait defer so cancellation happens first on every
+	// return path, letting an idle watcher exit before the wait.
 	defer cancel()
-	agent.StartParentWatcher(runCtx, cancel, cfg.LogDir, agent.ResolveErrorPublisher(*cfg))
 
 	mods, err := buildModules(*cfg)
 	if err != nil {
@@ -411,7 +425,11 @@ func buildModules(cfg agent.Config) ([]agent.Module, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create job module: %w", err)
 	}
-	return []agent.Module{logAgent, healthzAgent, eventAgent, reporterAgent, jobAgent}, nil
+	aggregatorAgent, err := aggregator.New(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("create aggregator module: %w", err)
+	}
+	return []agent.Module{logAgent, healthzAgent, eventAgent, reporterAgent, jobAgent, aggregatorAgent}, nil
 }
 
 // isValidLogLevel reports whether level is one of common.LoggerLevelChoices.

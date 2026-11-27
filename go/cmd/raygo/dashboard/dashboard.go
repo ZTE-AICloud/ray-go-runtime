@@ -32,9 +32,11 @@ import (
 	logmod "github.com/ray-project/ray/go/internal/dashboard/head/modules/log"
 	"github.com/ray-project/ray/go/internal/dashboard/head/modules/metrics"
 	"github.com/ray-project/ray/go/internal/dashboard/head/modules/node"
+	"github.com/ray-project/ray/go/internal/dashboard/head/modules/platform_events"
 	"github.com/ray-project/ray/go/internal/dashboard/head/modules/reporter"
 	"github.com/ray-project/ray/go/internal/dashboard/head/modules/serve"
 	"github.com/ray-project/ray/go/internal/dashboard/head/modules/state"
+	"github.com/ray-project/ray/go/internal/dashboard/head/modules/task_events"
 	"github.com/ray-project/ray/go/internal/dashboard/head/modules/train"
 	"github.com/ray-project/ray/go/internal/dashboard/head/modules/usage_stats"
 	"github.com/ray-project/ray/go/internal/runtime_env"
@@ -194,10 +196,12 @@ func runDashboard(ctx context.Context) error {
 	// are never loaded, aligned with DashboardHeadModule.is_enabled in
 	// subprocesses/module.py.
 	mods := []head.HeadModule{}
+	stateHead := state.New(cfg, client)
+	reporterHead := reporter.New(cfg, client)
 	allMods := []head.HeadModule{
-		state.New(cfg, client),
+		stateHead,
 		node.New(cfg, client),
-		reporter.New(cfg, client),
+		reporterHead,
 		logmod.New(cfg, client),
 		event.New(cfg, client),
 		metrics.New(cfg, client),
@@ -208,6 +212,14 @@ func runDashboard(ctx context.Context) error {
 		serve.New(cfg, client),
 		train.New(cfg, client),
 		data.New(cfg, client),
+	}
+	var taskEventsHead *task_events.TaskEventsHead
+	if task_events.IsEnabled() {
+		taskEventsHead = task_events.New(cfg, client)
+		allMods = append(allMods, taskEventsHead)
+	}
+	if platform_events.IsEnabled() {
+		allMods = append(allMods, platform_events.New(cfg, client))
 	}
 	if cfg.Minimal {
 		// Aligned with the Python dashboard: minimal mode loads the
@@ -231,6 +243,15 @@ func runDashboard(ctx context.Context) error {
 		for _, m := range allMods {
 			if load[m.Name()] && !disabled[m.Name()] {
 				mods = append(mods, m)
+			}
+		}
+	}
+	if taskEventsHead != nil {
+		for _, m := range mods {
+			if m == taskEventsHead {
+				stateHead.SetTaskEventsQuerier(taskEventsHead.Query)
+				reporterHead.SetTaskEventsQuerier(taskEventsHead.Query)
+				break
 			}
 		}
 	}

@@ -107,6 +107,7 @@ struct ActorCreateOptions {
   bool is_asyncio = false;         // whether async direct call
   int32_t max_pending_calls = -1;  // max pending calls (-1 unlimited)
   std::vector<ConcurrencyGroupDescriptor> concurrency_groups;
+  std::unordered_map<std::string, std::string> label_selector;
 };
 
 /**

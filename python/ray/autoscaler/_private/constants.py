@@ -148,6 +148,10 @@ RAY_PROCESSES = [
     ["log_monitor.py", False],
     [AGENT_PROCESS_TYPE_DASHBOARD_AGENT, False],
     [os.path.join("dashboard", "dashboard.py"), False],
+    # Go dashboard agent and head. The head entry keeps a trailing space so the
+    # substring match hits "raygo dashboard <args>" but not "raygo dashboard-agent".
+    ["raygo dashboard-agent", False],
+    ["raygo dashboard ", False],
     [AGENT_PROCESS_TYPE_RUNTIME_ENV_AGENT, False],
     # On Windows, setproctitle does not change the process name or command line
     # visible to psutil, so the "ray::DashboardAgent" / "ray::RuntimeEnvAgent"

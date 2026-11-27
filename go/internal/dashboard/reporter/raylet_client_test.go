@@ -624,3 +624,25 @@ func TestBeginCycleEvictsDepartedPids(t *testing.T) {
 		t.Errorf("cpu_percent for a continuously sampled process = %v, want > 0", got)
 	}
 }
+
+// TestNewRayletWorkerPIDFetcherDialFailure verifies that a raylet address with
+// no listener yields an error from the fetcher (not a hang or a panic), and
+// that the degraded worker list the caller builds stays empty. It covers the
+// grpc.DialContext failure path of the pure-Go worker PID client.
+func TestNewRayletWorkerPIDFetcherDialFailure(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close() // a closed listener dials back with connection refused
+
+	fetcher := newRayletWorkerPIDFetcher("127.0.0.1", port)
+	pids, err := fetcher()
+	if err == nil {
+		t.Fatalf("fetcher returned pids=%v, want a dial error for a closed port", pids)
+	}
+	if pids != nil {
+		t.Errorf("fetcher returned pids=%v on error, want nil", pids)
+	}
+}

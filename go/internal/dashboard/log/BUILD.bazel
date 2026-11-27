@@ -27,7 +27,6 @@ go_library(
     srcs = [
         "log_agent.go",
         "log_consts.go",
-        "logservice_stub.go",
         "mimetypes.go",
         "module.go",
         "static.go",

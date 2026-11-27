@@ -15,6 +15,7 @@
 package submitter
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -184,6 +185,46 @@ func TestActorCreationOptions_ValidateMaxPendingCalls(t *testing.T) {
 				t.Fatalf("ValidateMaxPendingCalls() = %v, want nil for %d", err, tt.value)
 			}
 		})
+	}
+}
+
+// TestActorCreationOptions_ValidateLabelSelector pins the selector syntax
+// rules against python validate_label_selector (label_utils.py): keys are an
+// optional prefix plus a <= 63 char label name, values are a label, an
+// optional !-negated label, or an optionally !-negated in(...) list, and an
+// empty value matches every node.
+func TestActorCreationOptions_ValidateLabelSelector(t *testing.T) {
+	valid := []map[string]string{
+		{"ray.io/instance-type": "m5.large"},
+		{"gpu": "in(A100, H100)"},
+		{"gpu": "!in(A100)"},
+		{"accelerator": "!spot"},
+		{"match-all": ""},
+		{"a.b_c-d": "v.1_2-3"},
+		{"prefixed.example.com/name": "value"},
+	}
+	for _, selector := range valid {
+		opts := &ActorCreationOptions{LabelSelector: selector}
+		assert.NoError(t, opts.ValidateLabelSelector(), "selector %v should validate", selector)
+	}
+
+	invalid := []map[string]string{
+		{"": "v"},                      // empty key
+		{"-leading-dash": "v"},         // key starts with a dash
+		{"trailing-dash-": "v"},        // key ends with a dash
+		{strings.Repeat("a", 64): "v"}, // key longer than 63 characters
+		{"k": "-leading-dash"},         // value starts with a dash
+		{"k": "trailing-underscore_"},  // value ends with an underscore
+		{"k": strings.Repeat("a", 64)}, // value longer than 63 characters
+		{"k": "in()"},                  // empty in() list
+		{"k": "in(A100"},               // unclosed in( list
+		{"k": "notin(A100)"},           // unsupported operator
+		{"k": "in(A100,,H100)"},        // empty member in the list
+		{"bad_prefix//name": "v"},      // malformed prefix
+	}
+	for _, selector := range invalid {
+		opts := &ActorCreationOptions{LabelSelector: selector}
+		assert.Error(t, opts.ValidateLabelSelector(), "selector %v should be rejected", selector)
 	}
 }
 

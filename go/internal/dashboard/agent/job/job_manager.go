@@ -481,10 +481,13 @@ func (m *JobManager) submitJob(ctx context.Context, req *JobSubmitRequest) (stri
 	}
 
 	m.appendDriverLog(submissionID, "Runtime env is setting up.")
+	// A non-empty entrypoint_label_selector also disables head-node pinning so
+	// the scheduler can place the supervisor on a node matching the selector.
 	resourcesSpecified := (jobInfo.EntrypointNumCPUs != nil && *jobInfo.EntrypointNumCPUs > 0) ||
 		(jobInfo.EntrypointNumGPUs != nil && *jobInfo.EntrypointNumGPUs > 0) ||
 		(jobInfo.EntrypointMemory != nil && *jobInfo.EntrypointMemory > 0) ||
-		len(jobInfo.EntrypointResources) > 0
+		len(jobInfo.EntrypointResources) > 0 ||
+		len(req.EntrypointLabelSelector) > 0
 	nodeAffinity := m.applySchedulingStrategy(submissionID, resourcesSpecified)
 
 	m.eventLogger.submissionStarted(submissionID)
@@ -542,6 +545,7 @@ func (m *JobManager) submitJob(ctx context.Context, req *JobSubmitRequest) (stri
 		numGPUs:        entrypointNumGPUs,
 		memory:         entrypointMemory,
 		resources:      req.EntrypointResources,
+		labelSelector:  req.EntrypointLabelSelector,
 		runtimeEnvJSON: supervisorRuntimeEnvJSON,
 		nodeAffinity:   nodeAffinity,
 	}

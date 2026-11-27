@@ -541,8 +541,8 @@ func (d *DataSource) Actor(actorID string) *proto.ActorTableData {
 	return d.actors[actorID]
 }
 
-// NodePhysicalStats returns the cached physical stats for the node.
-// TODO: consumed by the /nodes/{id} detail merge in a later task
+// NodePhysicalStats returns the cached physical stats for the node,
+// merged into nodeSummary for /nodes and /nodes/{id}.
 func (d *DataSource) NodePhysicalStats(nodeID string) map[string]interface{} {
 	d.mu.RLock()
 	defer d.mu.RUnlock()

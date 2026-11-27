@@ -1,0 +1,30 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "task_events",
+    srcs = [
+        "converter.go",
+        "store.go",
+        "task_events.go",
+    ],
+    importpath = "github.com/ray-project/ray/go/internal/dashboard/head/modules/task_events",
+    visibility = ["//go:__subpackages__"],
+    deps = [
+        "//go/internal/dashboard/head",
+        "//go/pkg/log",
+        "//go/proto",
+        "@org_golang_google_protobuf//proto",
+    ],
+)
+
+go_test(
+    name = "task_events_test",
+    srcs = ["task_events_test.go"],
+    embed = [":task_events"],
+    deps = [
+        "//go/internal/dashboard/head",
+        "//go/proto",
+        "@org_golang_google_protobuf//proto",
+        "@org_golang_google_protobuf//types/known/timestamppb",
+    ],
+)

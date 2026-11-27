@@ -468,3 +468,144 @@ func memoryProfilingExecutor(cap *cmdCapture) commandExecutor {
 		return CommandResult{Stdout: "ok", ExitCode: 0}
 	}
 }
+
+// TestReporterServiceMemoryProfilingCancellation verifies that a MemoryProfiling
+// request whose context is already cancelled returns the interruption message
+// without waiting for the sampling duration, so a long profile cannot block the
+// gRPC worker forever.
+func TestReporterServiceMemoryProfilingCancellation(t *testing.T) {
+	stubPasswordlessSudo(t, false)
+	stubLookPath(t)
+	orig := runCommandDetail
+	origSleep := memoryProfileSleep
+	defer func() {
+		runCommandDetail = orig
+		memoryProfileSleep = origSleep
+	}()
+	memoryProfileSleep = 0
+	runCommandDetail = memoryProfilingExecutor(&cmdCapture{})
+
+	s := newTestReporterService(t, t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	rep, err := s.MemoryProfiling(ctx, &proto.MemoryProfilingRequest{Pid: 5, Format: strp("flamegraph"), Duration: u32p(1)})
+	if err != nil {
+		t.Fatalf("MemoryProfiling: %v", err)
+	}
+	if rep.GetSuccess() {
+		t.Error("MemoryProfiling success = true, want false when the context is cancelled")
+	}
+	if !strings.Contains(rep.GetOutput(), "interrupted by request cancellation") {
+		t.Errorf("MemoryProfiling output = %q, want the cancellation message", rep.GetOutput())
+	}
+}
+
+// TestReporterServiceMemoryProfilingDetachFailureWarns verifies a failed memray
+// detach is surfaced through the reply warning while the profile result is still
+// reported, mirroring the Python agent.
+func TestReporterServiceMemoryProfilingDetachFailureWarns(t *testing.T) {
+	stubPasswordlessSudo(t, false)
+	stubLookPath(t)
+	orig := runCommandDetail
+	origSleep := memoryProfileSleep
+	defer func() {
+		runCommandDetail = orig
+		memoryProfileSleep = origSleep
+	}()
+	memoryProfileSleep = 0
+
+	// attach and report succeed and write their artifacts; detach fails.
+	runCommandDetail = func(name string, args ...string) CommandResult {
+		if len(args) > 0 && args[0] == "detach" {
+			return CommandResult{Stderr: "memray detach failed", ExitCode: 1}
+		}
+		for i, a := range args {
+			if a == "-o" && i+1 < len(args) {
+				_ = os.WriteFile(args[i+1], []byte("profile-data"), 0644)
+			}
+		}
+		return CommandResult{Stdout: "ok", ExitCode: 0}
+	}
+
+	s := newTestReporterService(t, t.TempDir())
+	rep, err := s.MemoryProfiling(context.Background(), &proto.MemoryProfilingRequest{Pid: 5, Format: strp("flamegraph"), Duration: u32p(1)})
+	if err != nil {
+		t.Fatalf("MemoryProfiling: %v", err)
+	}
+	if !rep.GetSuccess() {
+		t.Fatalf("MemoryProfiling success = false, output = %q", rep.GetOutput())
+	}
+	if rep.Warning == nil || *rep.Warning == "" {
+		t.Error("MemoryProfiling warning is empty, want a detach-failure warning")
+	}
+}
+
+// TestReporterServiceMemoryProfilingDurationBounds verifies the sampling
+// duration defaults to the configured constant when the request omits it and is
+// capped at the maximum when the request carries an unreasonably large value.
+func TestReporterServiceMemoryProfilingDurationBounds(t *testing.T) {
+	stubPasswordlessSudo(t, false)
+	stubLookPath(t)
+	orig := runCommandDetail
+	origSleep := memoryProfileSleep
+	defer func() {
+		runCommandDetail = orig
+		memoryProfileSleep = origSleep
+	}()
+	memoryProfileSleep = 0
+	runCommandDetail = memoryProfilingExecutor(&cmdCapture{})
+
+	t.Run("omitted duration uses default", func(t *testing.T) {
+		s := newTestReporterService(t, t.TempDir())
+		rep, err := s.MemoryProfiling(context.Background(), &proto.MemoryProfilingRequest{Pid: 5, Format: strp("flamegraph")})
+		if err != nil {
+			t.Fatalf("MemoryProfiling: %v", err)
+		}
+		if !rep.GetSuccess() {
+			t.Fatalf("MemoryProfiling success = false, output = %q", rep.GetOutput())
+		}
+	})
+
+	t.Run("oversized duration is capped", func(t *testing.T) {
+		s := newTestReporterService(t, t.TempDir())
+		rep, err := s.MemoryProfiling(context.Background(), &proto.MemoryProfilingRequest{
+			Pid: 5, Format: strp("flamegraph"), Duration: u32p(99999999),
+		})
+		if err != nil {
+			t.Fatalf("MemoryProfiling: %v", err)
+		}
+		if !rep.GetSuccess() {
+			t.Fatalf("MemoryProfiling success = false, output = %q", rep.GetOutput())
+		}
+	})
+}
+
+// TestReporterServiceReportOCMetricsNilRequest verifies a nil ReportOCMetrics
+// request is rejected with an error.
+func TestReporterServiceReportOCMetricsNilRequest(t *testing.T) {
+	s := newTestReporterService(t, t.TempDir())
+	if _, err := s.ReportOCMetrics(context.Background(), nil); err == nil {
+		t.Error("ReportOCMetrics(nil) returned no error")
+	}
+}
+
+// TestReporterServiceReportOCMetricsExportFailureAcknowledges verifies a
+// malformed worker id (which fails the MetricsService.Export) is logged and the
+// RPC still returns an acknowledgement rather than failing, so a bad report from
+// one component cannot fail the RPC.
+func TestReporterServiceReportOCMetricsExportFailureAcknowledges(t *testing.T) {
+	s, err := NewReporterService(agent.Config{LogDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewReporterService: %v", err)
+	}
+	s.SetMetricsService(NewMetricsService(prometheus.NewRegistry()))
+
+	rep, err := s.ReportOCMetrics(context.Background(), &proto.ReportOCMetricsRequest{WorkerId: []byte{0x01}})
+	if err != nil {
+		t.Fatalf("ReportOCMetrics: %v", err)
+	}
+	if rep == nil {
+		t.Error("ReportOCMetrics returned nil reply on export failure")
+	}
+}

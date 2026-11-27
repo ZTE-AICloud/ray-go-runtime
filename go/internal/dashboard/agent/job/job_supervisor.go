@@ -60,6 +60,7 @@ type supervisorCreateOptions struct {
 	numGPUs        float64
 	memory         int64
 	resources      map[string]float64
+	labelSelector  map[string]string
 	runtimeEnvJSON string
 	nodeAffinity   *submitter.NodeAffinityOptions
 }
@@ -79,6 +80,9 @@ func createSupervisorActor(opts supervisorCreateOptions, constructorArgs ...inte
 	}
 	if opts.nodeAffinity != nil {
 		creator = creator.WithNodeAffinity(opts.nodeAffinity.NodeID, opts.nodeAffinity.Soft)
+	}
+	if len(opts.labelSelector) > 0 {
+		creator = creator.WithLabelSelector(opts.labelSelector)
 	}
 	handle, err := creator.Create(constructorArgs...)
 	if err != nil {

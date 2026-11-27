@@ -63,9 +63,9 @@ const (
 	// unexpected raylet death, mirroring ray_constants.RAYLET_DIED_ERROR in
 	// python/ray/_private/ray_constants.py.
 	rayletDiedErrorType = "raylet_died"
-	// rayletDeathPublishTimeout bounds the publish RPC, mirroring the
-	// 60-second timeout Python passes to publish_error_to_driver.
-	rayletDeathPublishTimeout = 60 * time.Second
+	// rayletDeathPublishTimeout bounds the publish RPC and exit drain wait so
+	// an unreachable GCS after raylet death cannot stall agent shutdown.
+	rayletDeathPublishTimeout = 5 * time.Second
 )
 
 // parentPidFn returns the current parent pid. It is a package-level variable so
@@ -79,26 +79,30 @@ var parentPidFn = os.Getppid
 var stdinReader io.Reader = os.Stdin
 
 // StartParentWatcher monitors the raylet that spawned this agent and
-// fate-shares with it: once it has proof of the raylet's death it records a
-// diagnostic, publishes RAYLET_DIED_ERROR to every attached driver, and cancels
-// ctx so the agent shuts down. Proof is a zero-byte read on the parent-lifetime
-// pipe when the raylet provides one, and parentDeathThreshold consecutive polls
-// in which this process's parent is not the raylet otherwise. It mirrors
-// Python's create_check_raylet_task.
+// fate-shares with it: once it has proof of the raylet's death it cancels ctx
+// so the agent shuts down, then records a diagnostic and publishes
+// RAYLET_DIED_ERROR to every attached driver. Proof is a zero-byte read on the
+// parent-lifetime pipe when the raylet provides one, and parentDeathThreshold
+// consecutive polls in which this process's parent is not the raylet otherwise.
+// It mirrors Python's create_check_raylet_task.
 //
-// When RAY_RAYLET_PID is unset or invalid the watcher does nothing: an agent
-// started outside a raylet must not shut itself down.
+// The returned channel is closed when the watcher goroutine has finished,
+// including any best-effort death report, so callers can avoid tearing down the
+// GCS client while the publish is still in flight. When RAY_RAYLET_PID is
+// unset or invalid the watcher is a no-op and the channel is already closed.
 //
 // Both of Python's paths are implemented: the pipe read is preferred when the
 // raylet asks for it, and the pid poll covers the rest.
 //
 // A nil publisher degrades to log-only reporting; production callers pass
 // ResolveErrorPublisher(cfg), which never returns nil.
-func StartParentWatcher(ctx context.Context, cancel context.CancelFunc, logDir string, publisher gcs.ErrorInfoPublisher) {
+func StartParentWatcher(ctx context.Context, cancel context.CancelFunc, logDir string, publisher gcs.ErrorInfoPublisher) <-chan struct{} {
 	rayletPid, ok := rayletPid()
 	if !ok {
-		return
+		return closedSignal()
 	}
+
+	done := make(chan struct{})
 
 	// The raylet chooses how this agent watches it. With pipe-based health
 	// checking (on by default) the raylet redirects a pipe to this process's
@@ -116,8 +120,11 @@ func StartParentWatcher(ctx context.Context, cancel context.CancelFunc, logDir s
 		// with a read still in flight.
 		reader := stdinReader
 		log.Log.Info("checking the raylet health by pipe", "raylet_pid", rayletPid)
-		go watchParentPipe(ctx, cancel, logDir, publisher, reader)
-		return
+		go func() {
+			defer close(done)
+			watchParentPipe(ctx, cancel, logDir, publisher, reader)
+		}()
+		return done
 	}
 
 	interval := parentCheckInterval()
@@ -132,6 +139,7 @@ func StartParentWatcher(ctx context.Context, cancel context.CancelFunc, logDir s
 	pidOf := parentPidFn
 
 	go func() {
+		defer close(done)
 		deathCount := 0
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -156,12 +164,44 @@ func StartParentWatcher(ctx context.Context, cancel context.CancelFunc, logDir s
 				"expected_pid", rayletPid,
 				"actual_ppid", actual)
 			if deathCount >= parentDeathThreshold {
-				reportRayletDeath(logDir, publisher)
+				// Cancel first so the agent enters shutdown even if the death
+				// report below blocks; the report is best-effort diagnostics
+				// and must never delay fate-sharing.
 				cancel()
+				<-reportRayletDeath(logDir, publisher)
 				return
 			}
 		}
 	}()
+	return done
+}
+
+// closedSignal returns an already-closed channel.
+func closedSignal() <-chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
+}
+
+// ParentWatcherDrainTimeout bounds how long the dashboard agent waits for the
+// parent watcher's death report before closing the GCS client.
+const ParentWatcherDrainTimeout = rayletDeathPublishTimeout + time.Second
+
+// WaitParentWatcher waits up to timeout for the channel returned by
+// StartParentWatcher to close, reporting whether the watcher finished before
+// the deadline. A nil channel is treated as already finished.
+func WaitParentWatcher(done <-chan struct{}, timeout time.Duration) bool {
+	if done == nil {
+		return true
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
 }
 
 // watchParentPipe fate-shares with the raylet through the parent-lifetime pipe
@@ -192,8 +232,8 @@ func watchParentPipe(ctx context.Context, cancel context.CancelFunc, logDir stri
 		log.Log.Error(err, "raylet health check by pipe failed; the agent may outlive the raylet")
 		return
 	case <-eof:
-		reportRayletDeath(logDir, publisher)
 		cancel()
+		<-reportRayletDeath(logDir, publisher)
 	}
 }
 
@@ -244,49 +284,58 @@ func parentCheckInterval() time.Duration {
 
 // reportRayletDeath records whether the raylet exited gracefully and, when it
 // did not — including when its log cannot be read — publishes the
-// RAYLET_DIED_ERROR diagnostic to every attached driver before the caller
-// cancels the agent. It mirrors Python's report_raylet_error_logs: the whole
-// message text goes to the log's message field (Python logs the full text via
-// logger.error/logger.exception), and the publish is best effort.
-func reportRayletDeath(logDir string, publisher gcs.ErrorInfoPublisher) {
+// RAYLET_DIED_ERROR diagnostic to every attached driver. The returned channel is
+// closed once the best-effort publish has finished; it is already closed when
+// there is nothing to publish.
+func reportRayletDeath(logDir string, publisher gcs.ErrorInfoPublisher) <-chan struct{} {
 	path := filepath.Join(logDir, "raylet.out")
 	lines, err := tailFileLines(path, rayletLogTailSize)
 	if err != nil {
 		msg := fmt.Sprintf("Raylet is terminated. Failed to read Raylet logs at %s: %s!", path, err)
 		log.Log.Error(err, msg)
-		publishRayletDiedError(publisher, msg)
-		return
+		return publishRayletDiedError(publisher, msg)
 	}
 	graceful, msg := classifyRayletDeath(lines)
 	if graceful {
 		log.Log.Info("Raylet is terminated. Termination is graceful.")
-		return
+		return closedSignal()
 	}
 	log.Log.Error(nil, msg)
-	publishRayletDiedError(publisher, msg)
+	return publishRayletDiedError(publisher, msg)
 }
 
 // publishRayletDiedError publishes one RAYLET_DIED_ERROR message to every
-// attached driver through the GCS error info channel, mirroring Python's
-// publish_error_to_driver(ray_constants.RAYLET_DIED_ERROR, msg) with a nil
-// job id: a 60-second timeout and a swallowed failure. The message lands on
-// the agent's GCS connection, which is still open at this point — the caller
-// cancels only after this returns.
-func publishRayletDiedError(publisher gcs.ErrorInfoPublisher, msg string) {
+// attached driver through the GCS error info channel. It waits up to
+// rayletDeathPublishTimeout before logging a timeout and returning; the
+// returned channel closes once the underlying publish call completes.
+func publishRayletDiedError(publisher gcs.ErrorInfoPublisher, msg string) <-chan struct{} {
 	if publisher == nil {
-		return
+		return closedSignal()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), rayletDeathPublishTimeout)
-	defer cancel()
-	jobID := ids.NilJobID()
-	payload := gcs.ErrorInfoPayload{
-		JobID:   jobID.Binary(),
-		Type:    rayletDiedErrorType,
-		Message: msg,
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ctx, cancel := context.WithTimeout(context.Background(), rayletDeathPublishTimeout)
+		defer cancel()
+		jobID := ids.NilJobID()
+		payload := gcs.ErrorInfoPayload{
+			JobID:   jobID.Binary(),
+			Type:    rayletDiedErrorType,
+			Message: msg,
+		}
+		if err := publisher.PublishErrorInfo(ctx, jobID.Hex(), payload); err != nil {
+			log.Log.Error(err, "Failed to publish raylet death error to drivers")
+		}
+	}()
+	timer := time.NewTimer(rayletDeathPublishTimeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		log.Log.Info("timed out publishing raylet death error to drivers",
+			"timeout", rayletDeathPublishTimeout.String())
 	}
-	if err := publisher.PublishErrorInfo(ctx, jobID.Hex(), payload); err != nil {
-		log.Log.Error(err, "Failed to publish raylet death error to drivers")
-	}
+	return done
 }
 
 // classifyRayletDeath reports whether the tail of raylet.out shows a graceful

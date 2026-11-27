@@ -27,6 +27,7 @@ import (
 
 	"github.com/ray-project/ray/go/internal/dashboard/head"
 	"github.com/ray-project/ray/go/pkg/log"
+	"github.com/ray-project/ray/go/proto"
 )
 
 // KV key constants aligned with python/ray/_private/ray_constants.py,
@@ -121,6 +122,13 @@ func New(cfg *head.HeadConfig, client *head.GCSClient) *ReportHead {
 
 // Name returns the module name, aligned with the Python ReportHead class name.
 func (r *ReportHead) Name() string { return "ReportHead" }
+
+// SetTaskEventsQuerier wires an in-process TaskEventsHead querier into
+// ReportHead's StateAPIManager so /task/traceback and profiling routes read
+// from the same task-event source as StateHead.
+func (r *ReportHead) SetTaskEventsQuerier(fn func(ctx context.Context, req *proto.GetTaskEventsRequest) (*proto.GetTaskEventsReply, error)) {
+	r.api.GetTaskEventsFn = fn
+}
 
 // Start fetches the cluster metadata once (aligned with the Python run()).
 func (r *ReportHead) Start(ctx context.Context) error {

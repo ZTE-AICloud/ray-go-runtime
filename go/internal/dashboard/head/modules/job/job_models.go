@@ -102,10 +102,10 @@ type JobInfo struct {
 
 // JobSubmitRequest mirrors the Python JobSubmitRequest dataclass.
 //
-// EntrypointLabelSelector is present only so the head can reject it: the Go
-// agent cannot honor a label selector (it pins the supervisor with a node
-// affinity strategy), and a typed decode that silently dropped the field would
-// accept a request whose scheduling constraint never took effect.
+// A non-empty EntrypointLabelSelector is applied to the supervisor actor as a
+// scheduling constraint and relaxes the default head-node pinning, so the
+// field is validated as a string-valued dict at submission instead of being
+// silently dropped by a typed decode.
 type JobSubmitRequest struct {
 	Entrypoint              string                 `json:"entrypoint"`
 	SubmissionID            *string                `json:"submission_id"`

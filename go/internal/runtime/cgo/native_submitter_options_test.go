@@ -215,3 +215,17 @@ func TestConvertActorCreationOptionsToC_NodeAffinity(t *testing.T) {
 	assert.False(t, bool(result.node_affinity_soft))
 	freeActorCreationOptions(result)
 }
+
+func TestConvertActorCreationOptionsToC_LabelSelector(t *testing.T) {
+	opts := &submitter.ActorCreationOptions{
+		LabelSelector: map[string]string{"pool": "gpu"},
+	}
+	result := convertActorCreationOptionsToC(opts, nil)
+	assert.NotNil(t, result)
+	assert.Equal(t, C.int(1), result.label_selector_count)
+	assert.NotNil(t, result.label_selector_keys)
+	assert.NotNil(t, result.label_selector_values)
+	assert.Equal(t, "pool", C.GoString(*result.label_selector_keys))
+	assert.Equal(t, "gpu", C.GoString(*result.label_selector_values))
+	freeActorCreationOptions(result)
+}

@@ -420,3 +420,12 @@ func TestPayloadComposeKeySetAlignsWithPython(t *testing.T) {
 		t.Errorf("top-level key set mismatch\n want: %v\n got:  %v", want, got)
 	}
 }
+
+// TestPayloadComposeUnmarshalableValue verifies Compose surfaces a marshaling
+// error instead of panicking when a stats value cannot be serialized to JSON.
+func TestPayloadComposeUnmarshalableValue(t *testing.T) {
+	_, err := NewStatsPayloadComposer(map[string]interface{}{"bad": make(chan int)}, 0).Compose()
+	if err == nil {
+		t.Error("Compose with an unmarshalable value returned no error")
+	}
+}

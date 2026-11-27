@@ -496,6 +496,17 @@ func (c *Client) NextJobID(ctx context.Context) (ids.JobID, error) {
 	return ids.JobIDFromInt(uint32(reply.JobId)), nil
 }
 
+// AddEvents forwards aggregated Ray events and task metadata to GCS via
+// RayEventExportGcsService.AddEvents.
+func (c *Client) AddEvents(ctx context.Context, req *proto.AddEventsRequest) (*proto.AddEventsReply, error) {
+	reply, err := proto.NewRayEventExportGcsServiceClient(c.conn).AddEvents(
+		c.withClusterID(ctx), req)
+	if err != nil {
+		return nil, fmt.Errorf("add task events to gcs: %w", err)
+	}
+	return reply, nil
+}
+
 // rayletStartWaitTime returns how long GetNodeToConnect waits for a raylet to
 // appear, honoring the RAY_raylet_start_wait_time_s env override (seconds) and
 // defaulting to 30 s, matching the C++ RayConfig default

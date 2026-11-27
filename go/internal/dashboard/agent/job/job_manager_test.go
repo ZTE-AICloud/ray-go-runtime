@@ -399,8 +399,24 @@ func TestMonitorUninitializedRuntimeEndsOnTerminalStatus(t *testing.T) {
 	defer cancel()
 	jm.ctx = monitorCtx
 
+	// Simulate the supervisor writing the authoritative terminal status into KV
+	// after the monitor has polled at least once in RUNNING state.
+	doneUpdate := make(chan error, 1)
+	go func() {
+		timer := time.NewTimer(1200 * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case <-monitorCtx.Done():
+			doneUpdate <- monitorCtx.Err()
+			return
+		case <-timer.C:
+		}
+		doneUpdate <- jm.jobInfoClient.PutStatus(monitorCtx, "job1", JobStatusSucceeded, nil, nil, nil)
+	}()
+
 	start := time.Now()
 	require.NoError(t, jm.monitorJobInternal("job1", nil))
+	require.NoError(t, <-doneUpdate)
 	require.Less(t, time.Since(start), 5*time.Second,
 		"monitor did not end on the terminal status; it spun until the context rescued it")
 
