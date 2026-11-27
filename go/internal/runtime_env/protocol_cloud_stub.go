@@ -31,27 +31,33 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
+
+var sharedCloudTransport = &http.Transport{
+	DialContext: (&net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext,
+	TLSHandshakeTimeout:   10 * time.Second,
+	ResponseHeaderTimeout: 30 * time.Second,
+	IdleConnTimeout:       90 * time.Second,
+}
 
 // cloudHandlers returns pure-Go HTTP handlers for GS, S3, Azure Blob Storage,
 // and ABFSS so cloud URIs work in the default Bazel build without pulling the
 // heavy cloud SDK dependency trees.
 func cloudHandlers(opts *DownloadOptions) []protocolHandler {
 	timeout := 300 * time.Second
-	if opts != nil && opts.HTTPTimeout > 0 {
+	if opts != nil {
+		// Preserve opts.HTTPTimeout == 0 as "no timeout" (matching
+		// httpProtocolHandler), so large archives are not aborted mid-download.
 		timeout = opts.HTTPTimeout
 	}
 	client := &http.Client{
-		Timeout: timeout,
-		Transport: &http.Transport{
-			DialContext: (&net.Dialer{
-				Timeout:   10 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ResponseHeaderTimeout: 30 * time.Second,
-		},
+		Timeout:   timeout,
+		Transport: sharedCloudTransport,
 	}
 	return []protocolHandler{
 		&gsProtocolHandler{client: client},
@@ -134,16 +140,31 @@ func (h *gsProtocolHandler) Download(ctx context.Context, sourceURI string, dest
 	return nil
 }
 
+var (
+	gceTokenMu     sync.Mutex
+	gceCachedToken string
+	gceTokenExpiry time.Time
+)
+
 func resolveGCSToken(ctx context.Context, client *http.Client) string {
 	if tok := strings.TrimSpace(os.Getenv("GOOGLE_OAUTH_ACCESS_TOKEN")); tok != "" {
 		return tok
 	}
-	if os.Getenv("GCE_METADATA_HOST") == "" {
-		return ""
+	gceTokenMu.Lock()
+	if gceCachedToken != "" && time.Now().Before(gceTokenExpiry) {
+		tok := gceCachedToken
+		gceTokenMu.Unlock()
+		return tok
 	}
-	metaCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	gceTokenMu.Unlock()
+
+	host := strings.TrimSpace(os.Getenv("GCE_METADATA_HOST"))
+	if host == "" {
+		host = "metadata.google.internal"
+	}
+	metaCtx, cancel := context.WithTimeout(ctx, 1*time.Second)
 	defer cancel()
-	metaURL := "http://" + strings.TrimRight(os.Getenv("GCE_METADATA_HOST"), "/") +
+	metaURL := "http://" + strings.TrimRight(host, "/") +
 		"/computeMetadata/v1/instance/service-accounts/default/token"
 	req, err := http.NewRequestWithContext(metaCtx, http.MethodGet, metaURL, nil)
 	if err != nil {
@@ -160,9 +181,16 @@ func resolveGCSToken(ctx context.Context, client *http.Client) string {
 	}
 	var tokResp struct {
 		AccessToken string `json:"access_token"`
+		ExpiresIn   int    `json:"expires_in"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&tokResp); err != nil {
 		return ""
+	}
+	if tokResp.AccessToken != "" && tokResp.ExpiresIn > 60 {
+		gceTokenMu.Lock()
+		gceCachedToken = tokResp.AccessToken
+		gceTokenExpiry = time.Now().Add(time.Duration(tokResp.ExpiresIn-60) * time.Second)
+		gceTokenMu.Unlock()
 	}
 	return tokResp.AccessToken
 }
@@ -325,8 +353,9 @@ func (h *azureProtocolHandler) Download(ctx context.Context, sourceURI string, d
 		endpoint = fmt.Sprintf("https://%s.blob.core.windows.net", account)
 	}
 
+	sas := strings.TrimPrefix(strings.TrimSpace(os.Getenv("AZURE_STORAGE_SAS_TOKEN")), "?")
 	targetURL := fmt.Sprintf("%s/%s/%s", endpoint, url.PathEscape(parts.Bucket), escapeS3Key(parts.ObjectName))
-	if sas := strings.TrimPrefix(strings.TrimSpace(os.Getenv("AZURE_STORAGE_SAS_TOKEN")), "?"); sas != "" {
+	if sas != "" {
 		targetURL += "?" + sas
 	}
 
@@ -334,8 +363,10 @@ func (h *azureProtocolHandler) Download(ctx context.Context, sourceURI string, d
 	if err != nil {
 		return fmt.Errorf("failed to build Azure request: %w", err)
 	}
-	if err := applyAzureAuth(req, account, parts.Bucket, parts.ObjectName); err != nil {
-		return err
+	if sas == "" {
+		if err := applyAzureAuth(req, account, parts.Bucket, parts.ObjectName); err != nil {
+			return err
+		}
 	}
 
 	resp, err := h.client.Do(req)
@@ -387,8 +418,9 @@ func (h *abfssProtocolHandler) Download(ctx context.Context, sourceURI string, d
 		endpoint = "https://" + host
 	}
 
+	sas := strings.TrimPrefix(strings.TrimSpace(os.Getenv("AZURE_STORAGE_SAS_TOKEN")), "?")
 	targetURL := fmt.Sprintf("%s/%s/%s", endpoint, url.PathEscape(filesystem), escapeS3Key(objectPath))
-	if sas := strings.TrimPrefix(strings.TrimSpace(os.Getenv("AZURE_STORAGE_SAS_TOKEN")), "?"); sas != "" {
+	if sas != "" {
 		targetURL += "?" + sas
 	}
 
@@ -396,8 +428,10 @@ func (h *abfssProtocolHandler) Download(ctx context.Context, sourceURI string, d
 	if err != nil {
 		return fmt.Errorf("failed to build ABFSS request: %w", err)
 	}
-	if err := applyAzureAuth(req, account, filesystem, objectPath); err != nil {
-		return err
+	if sas == "" {
+		if err := applyAzureAuth(req, account, filesystem, objectPath); err != nil {
+			return err
+		}
 	}
 
 	resp, err := h.client.Do(req)

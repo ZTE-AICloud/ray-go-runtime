@@ -25,6 +25,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ray-project/ray/go/internal/common"
 	"github.com/ray-project/ray/go/pkg/log"
@@ -200,56 +201,87 @@ var resolvePluginPython = func() string {
 	return "python"
 }
 
+const (
+	pythonPluginOpTimeout   = 30 * time.Second
+	pythonJSONSentinelBegin = "__RAY_GO_JSON_BEGIN__"
+	pythonJSONSentinelEnd   = "__RAY_GO_JSON_END__"
+)
+
+func extractSentinelJSON(raw []byte) []byte {
+	begin := []byte(pythonJSONSentinelBegin)
+	end := []byte(pythonJSONSentinelEnd)
+	if start := bytes.LastIndex(raw, begin); start >= 0 {
+		rest := raw[start+len(begin):]
+		if stop := bytes.Index(rest, end); stop >= 0 {
+			return bytes.TrimSpace(rest[:stop])
+		}
+	}
+	return bytes.TrimSpace(raw)
+}
+
 const pythonPluginBridgeScript = `
-import asyncio, inspect, json, sys
+import asyncio, inspect, json, logging, sys
 from ray._common.utils import import_attr
 from ray._private.runtime_env.context import RuntimeEnvContext
+
+def emit(obj):
+    sys.stdout.write("__RAY_GO_JSON_BEGIN__" + json.dumps(obj) + "__RAY_GO_JSON_END__\n")
+    sys.stdout.flush()
 
 req = json.loads(sys.stdin.read())
 cls = import_attr(req["class"])
 op = req["op"]
 if op == "meta":
-    print(json.dumps({"name": getattr(cls, "name", "") or "", "priority": int(getattr(cls, "priority", 10))}))
+    emit({"name": getattr(cls, "name", "") or "", "priority": int(getattr(cls, "priority", 10))})
     sys.exit(0)
 inst = cls()
+logger = logging.getLogger("runtime_env.plugin")
 if op == "validate":
     inst.validate(req.get("runtime_env") or {})
-    print(json.dumps({"ok": True}))
+    emit({"ok": True})
 elif op == "get_uris":
     uris = inst.get_uris(req.get("runtime_env") or {}) or []
-    print(json.dumps({"uris": list(uris)}))
+    emit({"uris": list(uris)})
 elif op == "create":
     ctx_in = req.get("context") or {}
     ctx = RuntimeEnvContext(
         command_prefix=ctx_in.get("command_prefix") or [],
         env_vars=ctx_in.get("env_vars") or {},
-        py_executable=ctx_in.get("py_executable") or "default",
+        py_executable=ctx_in.get("py_executable") or None,
+        override_worker_entrypoint=ctx_in.get("override_worker_entrypoint") or None,
+        java_jars=ctx_in.get("java_jars") or [],
     )
-    res = inst.create(req.get("uri") or "", req.get("runtime_env") or {}, ctx, None)
+    res = inst.create(req.get("uri") or "", req.get("runtime_env") or {}, ctx, logger)
     if inspect.isawaitable(res):
         res = asyncio.run(res)
-    print(json.dumps({
+    emit({
         "size_bytes": int(res or 0),
         "command_prefix": ctx.command_prefix,
         "env_vars": ctx.env_vars,
-        "py_executable": ctx.py_executable,
-    }))
+        "py_executable": ctx.py_executable or "",
+        "override_worker_entrypoint": ctx.override_worker_entrypoint or "",
+        "java_jars": ctx.java_jars or [],
+    })
 elif op == "modify_context":
     ctx_in = req.get("context") or {}
     ctx = RuntimeEnvContext(
         command_prefix=ctx_in.get("command_prefix") or [],
         env_vars=ctx_in.get("env_vars") or {},
-        py_executable=ctx_in.get("py_executable") or "default",
+        py_executable=ctx_in.get("py_executable") or None,
+        override_worker_entrypoint=ctx_in.get("override_worker_entrypoint") or None,
+        java_jars=ctx_in.get("java_jars") or [],
     )
-    inst.modify_context(req.get("uris") or [], req.get("runtime_env") or {}, ctx, None)
-    print(json.dumps({
+    inst.modify_context(req.get("uris") or [], req.get("runtime_env") or {}, ctx, logger)
+    emit({
         "command_prefix": ctx.command_prefix,
         "env_vars": ctx.env_vars,
-        "py_executable": ctx.py_executable,
-    }))
+        "py_executable": ctx.py_executable or "",
+        "override_worker_entrypoint": ctx.override_worker_entrypoint or "",
+        "java_jars": ctx.java_jars or [],
+    })
 elif op == "delete_uri":
-    freed = inst.delete_uri(req.get("uri") or "", None)
-    print(json.dumps({"freed_bytes": int(freed or 0)}))
+    freed = inst.delete_uri(req.get("uri") or "", logger)
+    emit({"freed_bytes": int(freed or 0)})
 `
 
 func newPythonBridgePlugin(classPath string) (*pythonBridgePlugin, error) {
@@ -261,7 +293,9 @@ func newPythonBridgePlugin(classPath string) (*pythonBridgePlugin, error) {
 		Name     string `json:"name"`
 		Priority int    `json:"priority"`
 	}
-	if err := p.call(context.Background(), map[string]any{"op": "meta", "class": classPath}, &resp); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), pythonPluginOpTimeout)
+	defer cancel()
+	if err := p.call(ctx, map[string]any{"op": "meta", "class": classPath}, &resp); err != nil {
 		return nil, err
 	}
 	p.name = resp.Name
@@ -283,7 +317,7 @@ func (p *pythonBridgePlugin) call(ctx context.Context, payload map[string]any, o
 		return fmt.Errorf("python plugin %s op=%v failed: %w: %s", p.classPath, payload["op"], err, strings.TrimSpace(stderr.String()))
 	}
 	if out != nil {
-		if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), out); err != nil {
+		if err := json.Unmarshal(extractSentinelJSON(stdout.Bytes()), out); err != nil {
 			return fmt.Errorf("decode python plugin %s response: %w", p.classPath, err)
 		}
 	}
@@ -294,7 +328,9 @@ func (p *pythonBridgePlugin) Name() string  { return p.name }
 func (p *pythonBridgePlugin) Priority() int { return p.priority }
 
 func (p *pythonBridgePlugin) Validate(runtimeEnv *RuntimeEnv) error {
-	return p.call(context.Background(), map[string]any{
+	ctx, cancel := context.WithTimeout(context.Background(), pythonPluginOpTimeout)
+	defer cancel()
+	return p.call(ctx, map[string]any{
 		"op":          "validate",
 		"class":       p.classPath,
 		"runtime_env": runtimeEnv,
@@ -305,7 +341,9 @@ func (p *pythonBridgePlugin) GetURIs(runtimeEnv *RuntimeEnv) []string {
 	var resp struct {
 		URIs []string `json:"uris"`
 	}
-	if err := p.call(context.Background(), map[string]any{
+	ctx, cancel := context.WithTimeout(context.Background(), pythonPluginOpTimeout)
+	defer cancel()
+	if err := p.call(ctx, map[string]any{
 		"op":          "get_uris",
 		"class":       p.classPath,
 		"runtime_env": runtimeEnv,
@@ -316,25 +354,33 @@ func (p *pythonBridgePlugin) GetURIs(runtimeEnv *RuntimeEnv) []string {
 	return resp.URIs
 }
 
-func (p *pythonBridgePlugin) Create(ctx context.Context, uri string, runtimeEnv *RuntimeEnv, envCtx *RuntimeEnvContext) (int64, error) {
-	var resp struct {
-		SizeBytes     int64             `json:"size_bytes"`
-		CommandPrefix []string          `json:"command_prefix"`
-		EnvVars       map[string]string `json:"env_vars"`
-		PyExecutable  string            `json:"py_executable"`
-	}
+func serializeContextForPython(envCtx *RuntimeEnvContext) map[string]any {
 	ctxMap := map[string]any{}
 	if envCtx != nil {
 		ctxMap["command_prefix"] = envCtx.CommandPrefix
 		ctxMap["env_vars"] = envCtx.EnvVars
 		ctxMap["py_executable"] = envCtx.PyExecutable
+		ctxMap["override_worker_entrypoint"] = envCtx.OverrideWorkerEntrypoint
+		ctxMap["java_jars"] = envCtx.JavaJars
+	}
+	return ctxMap
+}
+
+func (p *pythonBridgePlugin) Create(ctx context.Context, uri string, runtimeEnv *RuntimeEnv, envCtx *RuntimeEnvContext) (int64, error) {
+	var resp struct {
+		SizeBytes                int64             `json:"size_bytes"`
+		CommandPrefix            []string          `json:"command_prefix"`
+		EnvVars                  map[string]string `json:"env_vars"`
+		PyExecutable             string            `json:"py_executable"`
+		OverrideWorkerEntrypoint string            `json:"override_worker_entrypoint"`
+		JavaJars                 []string          `json:"java_jars"`
 	}
 	if err := p.call(ctx, map[string]any{
 		"op":          "create",
 		"class":       p.classPath,
 		"uri":         uri,
 		"runtime_env": runtimeEnv,
-		"context":     ctxMap,
+		"context":     serializeContextForPython(envCtx),
 	}, &resp); err != nil {
 		return 0, err
 	}
@@ -342,28 +388,28 @@ func (p *pythonBridgePlugin) Create(ctx context.Context, uri string, runtimeEnv 
 		envCtx.CommandPrefix = resp.CommandPrefix
 		envCtx.EnvVars = resp.EnvVars
 		envCtx.PyExecutable = resp.PyExecutable
+		envCtx.OverrideWorkerEntrypoint = resp.OverrideWorkerEntrypoint
+		envCtx.JavaJars = resp.JavaJars
 	}
 	return resp.SizeBytes, nil
 }
 
 func (p *pythonBridgePlugin) ModifyContext(uris []string, runtimeEnv *RuntimeEnv, envCtx *RuntimeEnvContext) error {
 	var resp struct {
-		CommandPrefix []string          `json:"command_prefix"`
-		EnvVars       map[string]string `json:"env_vars"`
-		PyExecutable  string            `json:"py_executable"`
+		CommandPrefix            []string          `json:"command_prefix"`
+		EnvVars                  map[string]string `json:"env_vars"`
+		PyExecutable             string            `json:"py_executable"`
+		OverrideWorkerEntrypoint string            `json:"override_worker_entrypoint"`
+		JavaJars                 []string          `json:"java_jars"`
 	}
-	ctxMap := map[string]any{}
-	if envCtx != nil {
-		ctxMap["command_prefix"] = envCtx.CommandPrefix
-		ctxMap["env_vars"] = envCtx.EnvVars
-		ctxMap["py_executable"] = envCtx.PyExecutable
-	}
-	if err := p.call(context.Background(), map[string]any{
+	ctx, cancel := context.WithTimeout(context.Background(), pythonPluginOpTimeout)
+	defer cancel()
+	if err := p.call(ctx, map[string]any{
 		"op":          "modify_context",
 		"class":       p.classPath,
 		"uris":        uris,
 		"runtime_env": runtimeEnv,
-		"context":     ctxMap,
+		"context":     serializeContextForPython(envCtx),
 	}, &resp); err != nil {
 		return err
 	}
@@ -371,6 +417,8 @@ func (p *pythonBridgePlugin) ModifyContext(uris []string, runtimeEnv *RuntimeEnv
 		envCtx.CommandPrefix = resp.CommandPrefix
 		envCtx.EnvVars = resp.EnvVars
 		envCtx.PyExecutable = resp.PyExecutable
+		envCtx.OverrideWorkerEntrypoint = resp.OverrideWorkerEntrypoint
+		envCtx.JavaJars = resp.JavaJars
 	}
 	return nil
 }
@@ -379,7 +427,9 @@ func (p *pythonBridgePlugin) DeleteURI(uri string) int64 {
 	var resp struct {
 		FreedBytes int64 `json:"freed_bytes"`
 	}
-	if err := p.call(context.Background(), map[string]any{
+	ctx, cancel := context.WithTimeout(context.Background(), pythonPluginOpTimeout)
+	defer cancel()
+	if err := p.call(ctx, map[string]any{
 		"op":    "delete_uri",
 		"class": p.classPath,
 		"uri":   uri,

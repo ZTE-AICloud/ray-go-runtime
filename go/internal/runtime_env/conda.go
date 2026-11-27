@@ -204,39 +204,50 @@ type pythonRayMetadata struct {
 }
 
 var (
-	pythonRayMetaOnce sync.Once
-	pythonRayMeta     pythonRayMetadata
+	pythonRayMetaMu     sync.Mutex
+	pythonRayMetaLoaded bool
+	pythonRayMeta       pythonRayMetadata
 )
 
 var probePythonRayMetadataFn = func() pythonRayMetadata {
 	py := resolvePluginPython()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	const script = `import json, ray
+	const script = `import json, sys, ray
 from ray._private.utils import get_wheel_filename, get_master_wheel_url, get_release_wheel_url
-print(json.dumps({
+sys.stdout.write("__RAY_GO_JSON_BEGIN__" + json.dumps({
     "version": getattr(ray, "__version__", "") or "",
     "commit": getattr(ray, "__commit__", "") or "",
     "wheel_filename": get_wheel_filename() or "",
     "master_wheel_url": get_master_wheel_url() or "",
     "release_wheel_url": get_release_wheel_url() or "",
-}))`
+}) + "__RAY_GO_JSON_END__\n")`
 	cmd := exec.CommandContext(ctx, py, "-c", script)
 	out, err := cmd.Output()
 	if err != nil {
+		log.Log.V(1).Info("Failed to probe Ray metadata from Python interpreter", "err", err)
 		return pythonRayMetadata{}
 	}
 	var meta pythonRayMetadata
-	if err := json.Unmarshal(bytes.TrimSpace(out), &meta); err != nil {
+	if err := json.Unmarshal(extractSentinelJSON(out), &meta); err != nil {
+		log.Log.V(1).Info("Failed to decode Ray metadata from Python interpreter", "err", err)
 		return pythonRayMetadata{}
 	}
 	return meta
 }
 
 func getPythonRayMetadata() pythonRayMetadata {
-	pythonRayMetaOnce.Do(func() {
-		pythonRayMeta = probePythonRayMetadataFn()
-	})
+	pythonRayMetaMu.Lock()
+	defer pythonRayMetaMu.Unlock()
+	if pythonRayMetaLoaded {
+		return pythonRayMeta
+	}
+	meta := probePythonRayMetadataFn()
+	if meta == (pythonRayMetadata{}) {
+		return meta
+	}
+	pythonRayMeta = meta
+	pythonRayMetaLoaded = true
 	return pythonRayMeta
 }
 
@@ -302,7 +313,7 @@ from ray._common.utils import import_attr
 req = json.loads(sys.stdin.read())
 hook = import_attr(req["hook"])
 out = hook(req["runtime_env"])
-print(json.dumps(out if out is not None else req["runtime_env"]))`
+sys.stdout.write("__RAY_GO_JSON_BEGIN__" + json.dumps(out if out is not None else req["runtime_env"]) + "__RAY_GO_JSON_END__\n")`
 	payload, err := json.Marshal(map[string]any{
 		"hook":        hookPath,
 		"runtime_env": json.RawMessage(rawIn),
@@ -319,11 +330,14 @@ print(json.dumps(out if out is not None else req["runtime_env"]))`
 		return nil, fmt.Errorf("RAY_RUNTIME_ENV_HOOK %q failed: %w: %s", hookPath, err, strings.TrimSpace(stderr.String()))
 	}
 	var transformed RuntimeEnv
-	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &transformed); err != nil {
+	if err := json.Unmarshal(extractSentinelJSON(stdout.Bytes()), &transformed); err != nil {
 		return nil, fmt.Errorf("decode RAY_RUNTIME_ENV_HOOK %q output: %w", hookPath, err)
 	}
 	return &transformed, nil
 }
+
+// WorkerProcessSetupHookEnvVar matches ray_constants.WORKER_PROCESS_SETUP_HOOK_ENV_VAR.
+const WorkerProcessSetupHookEnvVar = "__RAY_WORKER_PROCESS_SETUP_HOOK_ENV_VAR"
 
 // ApplyWorkerProcessSetupHook validates worker_process_setup_hook in re and
 // records it in envCtx.EnvVars so the spawned worker can execute the hook.
@@ -342,7 +356,7 @@ func ApplyWorkerProcessSetupHook(re *RuntimeEnv, envCtx *RuntimeEnvContext) erro
 	if envCtx.EnvVars == nil {
 		envCtx.EnvVars = make(map[string]string)
 	}
-	envCtx.EnvVars["RAY_WORKER_PROCESS_SETUP_HOOK"] = hookStr
+	envCtx.EnvVars[WorkerProcessSetupHookEnvVar] = hookStr
 	return nil
 }
 

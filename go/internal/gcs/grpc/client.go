@@ -22,6 +22,7 @@ package gcsgrpc
 import (
 	"context"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"strconv"
@@ -161,6 +162,9 @@ func (c *Client) Close() error { return c.conn.Close() }
 func (c *Client) PinRuntimeEnvURI(ctx context.Context, uri string, expirationS int) error {
 	if c.runtimeEnv == nil {
 		return fmt.Errorf("runtime env gcs service client is not initialized")
+	}
+	if expirationS < 0 || expirationS > math.MaxInt32 {
+		return fmt.Errorf("pin runtime env uri %q: invalid expiration %d", uri, expirationS)
 	}
 	reply, err := c.runtimeEnv.PinRuntimeEnvURI(c.withClusterID(ctx), &proto.PinRuntimeEnvURIRequest{
 		Uri:         uri,

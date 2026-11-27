@@ -20,7 +20,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sync"
 	"testing"
 )
 
@@ -176,10 +175,15 @@ func TestPythonRayMetadataFallback(t *testing.T) {
 	origProbe := probePythonRayMetadataFn
 	defer func() {
 		probePythonRayMetadataFn = origProbe
-		pythonRayMetaOnce = sync.Once{}
+		pythonRayMetaMu.Lock()
+		pythonRayMetaLoaded = false
 		pythonRayMeta = pythonRayMetadata{}
+		pythonRayMetaMu.Unlock()
 	}()
-	pythonRayMetaOnce = sync.Once{}
+	pythonRayMetaMu.Lock()
+	pythonRayMetaLoaded = false
+	pythonRayMeta = pythonRayMetadata{}
+	pythonRayMetaMu.Unlock()
 	probePythonRayMetadataFn = func() pythonRayMetadata {
 		return pythonRayMetadata{
 			Version:         "2.53.0",
@@ -219,7 +223,7 @@ func TestApplyRuntimeEnvHookUnsetAndSetupHook(t *testing.T) {
 	if err := ApplyWorkerProcessSetupHook(re, envCtx); err != nil {
 		t.Fatalf("ApplyWorkerProcessSetupHook: %v", err)
 	}
-	if envCtx.EnvVars["RAY_WORKER_PROCESS_SETUP_HOOK"] != "my_pkg.setup_hook" {
-		t.Errorf("RAY_WORKER_PROCESS_SETUP_HOOK = %q, want my_pkg.setup_hook", envCtx.EnvVars["RAY_WORKER_PROCESS_SETUP_HOOK"])
+	if envCtx.EnvVars[WorkerProcessSetupHookEnvVar] != "my_pkg.setup_hook" {
+		t.Errorf("%s = %q, want my_pkg.setup_hook", WorkerProcessSetupHookEnvVar, envCtx.EnvVars[WorkerProcessSetupHookEnvVar])
 	}
 }
