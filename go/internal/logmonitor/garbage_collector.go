@@ -224,15 +224,9 @@ func (g *GarbageCollector) scanDirectory(dirPath string, patterns []string) []gc
 		if !matchesAnyPattern(e.name, patterns) {
 			continue
 		}
-		// Skip non-regular entries (including symlinks) without Lstat when
-		// dirent d_type is known.
-		if e.typ != 0 && !e.typ.IsRegular() {
-			continue
-		}
-		// Lstat, not Stat: a symlinked log entry is left alone rather than
-		// followed to whatever it points at. Deleting through a link would
-		// remove a file this collector never scanned, so the deviation from
-		// the reference implementation's stat-based glob is deliberate.
+		// d_type is not reported by every filesystem (DT_UNKNOWN -> ModeIrregular),
+		// so Lstat all pattern matches; the IsRegular check below excludes
+		// symlinks (Lstat semantics) and non-regular files.
 		fileInfo, err := os.Lstat(e.path)
 		if err != nil || !fileInfo.Mode().IsRegular() {
 			continue

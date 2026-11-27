@@ -180,10 +180,11 @@ func (m *Monitor) updateLogFilenames() error {
 		if _, exists := m.tracked[path]; exists {
 			continue
 		}
-		// Skip os.Stat when ReadDir already reported a regular file (typ == 0
-		// with fromDir == true). For synthetic paths (fromDir == false, e.g.
-		// monitor.log) or symlinks, fall back to os.Stat.
-		if !c.fromDir || c.typ&fs.ModeSymlink != 0 {
+		// Only skip os.Stat for entries ReadDir reported as plain regular files
+		// (fromDir == true && typ == 0). Synthetic paths, symlinks, DT_UNKNOWN
+		// (ModeIrregular), directories, and FIFOs all go through os.Stat and
+		// the mode check below.
+		if !c.fromDir || c.typ != 0 {
 			info, err := os.Stat(path)
 			if err != nil {
 				if os.IsNotExist(err) {
@@ -194,9 +195,6 @@ func (m *Monitor) updateLogFilenames() error {
 			if !info.Mode().IsRegular() && info.Mode()&fs.ModeSymlink == 0 {
 				continue
 			}
-		} else if c.typ != 0 {
-			// Non-regular, non-symlink entry from ReadDir (e.g. directory, FIFO).
-			continue
 		}
 
 		fileInfo := &logFileInfo{

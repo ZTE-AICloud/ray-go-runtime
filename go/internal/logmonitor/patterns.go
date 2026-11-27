@@ -145,7 +145,8 @@ func orderedLogPaths(logsDir string, autoscalerV2Enabled bool, runtimeEnvToDrive
 			return nil, len(entries), err
 		}
 		for _, p := range tpuEntries {
-			candidates = append(candidates, dirEntryPath{path: p, name: filepath.Base(p), typ: fs.ModeType & 0})
+			// fromDir is false, so updateLogFilenames falls back to os.Stat.
+			candidates = append(candidates, dirEntryPath{path: p, name: filepath.Base(p)})
 		}
 	}
 	candidates = append(candidates, runtimeEnvEntries...)

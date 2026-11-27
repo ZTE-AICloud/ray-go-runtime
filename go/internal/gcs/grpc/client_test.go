@@ -448,6 +448,31 @@ func TestExistsMultiGetPinAndAutoscalerRPCs(t *testing.T) {
 	}
 }
 
+func TestNewClientNilClusterIDOmitsMetadata(t *testing.T) {
+	f := &fakeGCS{kvExists: true}
+	addr := startMockGCS(t, f)
+
+	c, err := NewClient(context.Background(), gcs.ClientOptions{
+		Address:   addr,
+		ClusterID: ids.NilClusterID(),
+		TimeoutMs: 5000,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+
+	if _, err := c.Exists(context.Background(), "ns", "k"); err != nil {
+		t.Fatalf("Exists: %v", err)
+	}
+	if got := f.gotMD.Get("ray_cluster_id"); len(got) != 0 {
+		t.Fatalf("ray_cluster_id metadata = %v, want empty for NilClusterID", got)
+	}
+	if c.rpcTimeout != 5*time.Second {
+		t.Fatalf("rpcTimeout = %v, want 5s", c.rpcTimeout)
+	}
+}
+
 func TestGetAllFiltersNodeIDs(t *testing.T) {
 	idA, err := ids.NodeIDFromHex(strings.Repeat("aa", 28))
 	if err != nil {
