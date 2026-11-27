@@ -25,11 +25,21 @@ var (
 	// globalGCSClient is the global GCS client instance used for the
 	// internal KV store.
 	globalGCSClient gcs.Client
+	// globalURIPinner optionally overrides PinRuntimeEnvURI when globalGCSClient
+	// does not directly implement gcs.RuntimeEnvURIPinner.
+	globalURIPinner gcs.RuntimeEnvURIPinner
 )
 
 // InternalKVReset clears the global GCS client instance.
 func InternalKVReset() {
 	globalGCSClient = nil
+	globalURIPinner = nil
+}
+
+// SetRuntimeEnvURIPinner registers a gcs.RuntimeEnvURIPinner (such as the
+// pure-Go GCS gRPC client) for PinRuntimeEnvURICall.
+func SetRuntimeEnvURIPinner(pinner gcs.RuntimeEnvURIPinner) {
+	globalURIPinner = pinner
 }
 
 // InternalKVGetGCSClient returns the global GCS client instance.
@@ -72,15 +82,17 @@ func InternalKVExists(ctx context.Context, key string, namespace string) (bool, 
 // PinRuntimeEnvURICall pins a runtime env URI reference in the GCS with the
 // given expiration (in seconds).
 func PinRuntimeEnvURICall(ctx context.Context, uri string, expirationS int) error {
+	if globalURIPinner != nil {
+		return globalURIPinner.PinRuntimeEnvURI(ctx, uri, expirationS)
+	}
 	if globalGCSClient == nil {
 		return fmt.Errorf("GCS client is not initialized")
 	}
-
-	// The GCS client's PinRuntimeEnvURI method is not implemented yet.
-	// Report the gap instead of pretending success: callers treat a nil
-	// error as having acquired the pin, which leaves uploaded packages
-	// exposed to the GCS runtime-env garbage collector.
-	return fmt.Errorf("PinRuntimeEnvURI is not implemented by the GCS bridge")
+	pinner, ok := globalGCSClient.(gcs.RuntimeEnvURIPinner)
+	if !ok {
+		return fmt.Errorf("PinRuntimeEnvURI is not supported by GCS client %T", globalGCSClient)
+	}
+	return pinner.PinRuntimeEnvURI(ctx, uri, expirationS)
 }
 
 // InternalKVPut puts a value under the given key and namespace, returning

@@ -153,3 +153,9 @@ type ErrorInfoPublisher interface {
 	// publish_error_to_driver timeout.
 	PublishErrorInfo(ctx context.Context, keyID string, payload ErrorInfoPayload) error
 }
+
+// RuntimeEnvURIPinner pins runtime environment package URIs in GCS so the
+// GCS runtime-env garbage collector does not reclaim them before expiration.
+type RuntimeEnvURIPinner interface {
+	PinRuntimeEnvURI(ctx context.Context, uri string, expirationS int) error
+}

@@ -17,6 +17,8 @@ package runtime_env
 import (
 	"bytes"
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -736,5 +738,84 @@ func TestBufferedWriterFlushBehavior(t *testing.T) {
 	}
 	if !bytes.Equal(content, testContent) {
 		t.Error("content mismatch after buffered write with multiple flushes")
+	}
+}
+
+func TestPureGoCloudProtocolsDownload(t *testing.T) {
+	if len(cloudProtocols()) != 4 {
+		t.Fatalf("cloudProtocols() = %v, want 4 protocols", cloudProtocols())
+	}
+
+	var gotGSAuth, gotS3Auth, gotAzureAuth, gotABFSSPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/storage/v1/b/my-bucket/o/dir/pkg.zip" && r.URL.Query().Get("alt") == "media":
+			gotGSAuth = r.Header.Get("Authorization")
+			_, _ = w.Write([]byte("gs-payload"))
+		case r.URL.Path == "/my-s3-bucket/dir/pkg.zip":
+			gotS3Auth = r.Header.Get("Authorization")
+			_, _ = w.Write([]byte("s3-payload"))
+		case r.URL.Path == "/my-container/pkg.zip":
+			gotAzureAuth = r.Header.Get("Authorization")
+			_, _ = w.Write([]byte("azure-payload"))
+		case r.URL.Path == "/my-fs/sub/pkg.zip":
+			gotABFSSPath = r.URL.Path
+			_, _ = w.Write([]byte("abfss-payload"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	t.Setenv("STORAGE_EMULATOR_HOST", srv.URL)
+	t.Setenv("GOOGLE_OAUTH_ACCESS_TOKEN", "test-gcs-tok")
+	t.Setenv("AWS_ENDPOINT_URL_S3", srv.URL)
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
+	t.Setenv("AWS_REGION", "us-west-2")
+	t.Setenv("AZURE_STORAGE_ACCOUNT", "testacct")
+	t.Setenv("AZURE_STORAGE_BLOB_ENDPOINT", srv.URL)
+	t.Setenv("AZURE_STORAGE_DFS_ENDPOINT", srv.URL)
+	t.Setenv("AZURE_STORAGE_KEY", "dGVzdGtleQ==")
+
+	tmpDir := t.TempDir()
+	ctx := context.Background()
+
+	cases := []struct {
+		proto Protocol
+		uri   string
+		want  string
+	}{
+		{ProtocolGS, "gs://my-bucket/dir/pkg.zip", "gs-payload"},
+		{ProtocolS3, "s3://my-s3-bucket/dir/pkg.zip", "s3-payload"},
+		{ProtocolAzure, "azure://my-container/pkg.zip", "azure-payload"},
+		{ProtocolABFSS, "abfss://my-fs@testacct.dfs.core.windows.net/sub/pkg.zip", "abfss-payload"},
+	}
+
+	for _, tc := range cases {
+		dest := filepath.Join(tmpDir, string(tc.proto)+".zip")
+		if err := DownloadRemoteURI(ctx, tc.proto, tc.uri, dest, nil); err != nil {
+			t.Fatalf("DownloadRemoteURI(%s, %s) failed: %v", tc.proto, tc.uri, err)
+		}
+		got, err := os.ReadFile(dest)
+		if err != nil {
+			t.Fatalf("read %s: %v", dest, err)
+		}
+		if string(got) != tc.want {
+			t.Fatalf("%s content = %q, want %q", tc.proto, string(got), tc.want)
+		}
+	}
+
+	if gotGSAuth != "Bearer test-gcs-tok" {
+		t.Errorf("GS Authorization = %q, want Bearer test-gcs-tok", gotGSAuth)
+	}
+	if !strings.HasPrefix(gotS3Auth, "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/") {
+		t.Errorf("S3 Authorization = %q, want AWS4-HMAC-SHA256 header", gotS3Auth)
+	}
+	if !strings.HasPrefix(gotAzureAuth, "SharedKey testacct:") {
+		t.Errorf("Azure Authorization = %q, want SharedKey header", gotAzureAuth)
+	}
+	if gotABFSSPath != "/my-fs/sub/pkg.zip" {
+		t.Errorf("ABFSS path = %q, want /my-fs/sub/pkg.zip", gotABFSSPath)
 	}
 }

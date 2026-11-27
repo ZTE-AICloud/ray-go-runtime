@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	"github.com/ray-project/ray/go/internal/common"
+	grpcgcs "github.com/ray-project/ray/go/internal/gcs/grpc"
 	"github.com/ray-project/ray/go/internal/runtime_env"
 	"github.com/ray-project/ray/go/internal/runtime_env/agent"
 	"github.com/ray-project/ray/go/pkg/gcs"
@@ -214,6 +215,17 @@ func runRuntimeEnvAgent(ctx context.Context) error {
 	gcsClient, err := connectGCSClient(opts)
 	if err != nil {
 		return fmt.Errorf("failed to connect to GCS client: %v", err)
+	}
+	if _, ok := gcsClient.(gcs.RuntimeEnvURIPinner); !ok {
+		if pinnerClient, perr := grpcgcs.NewClient(ctx, opts); perr == nil {
+			runtime_env.SetRuntimeEnvURIPinner(pinnerClient)
+			defer func() {
+				runtime_env.SetRuntimeEnvURIPinner(nil)
+				_ = pinnerClient.Close()
+			}()
+		} else {
+			log.Log.V(1).Info("Pure-Go GCS URI pinner unavailable; PinRuntimeEnvURI will fall back to GCS client", "err", perr)
+		}
 	}
 
 	// 2. Create the agent service.

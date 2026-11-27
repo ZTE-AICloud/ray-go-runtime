@@ -15,11 +15,15 @@
 package runtime_env
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"os"
+	"os/exec"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/ray-project/ray/go/internal/common"
@@ -77,20 +81,313 @@ type RuntimeEnvPluginManager struct {
 	pluginsMutex sync.RWMutex
 }
 
-// NewRuntimeEnvPluginManager creates a new plugin manager.
+// PluginConfig mirrors an entry in the RAY_RUNTIME_ENV_PLUGINS JSON array:
+// {"class": "my_pkg.MyPlugin", "priority": 20}.
+type PluginConfig struct {
+	Class    string `json:"class"`
+	Priority *int   `json:"priority,omitempty"`
+}
+
+var (
+	customPluginFactoriesMu sync.RWMutex
+	customPluginFactories   = make(map[string]func() RuntimeEnvPlugin)
+)
+
+// RegisterCustomPluginFactory registers a Go-native RuntimeEnvPlugin factory
+// keyed by its class path so RAY_RUNTIME_ENV_PLUGINS can instantiate it without
+// spawning Python.
+func RegisterCustomPluginFactory(classPath string, factory func() RuntimeEnvPlugin) {
+	customPluginFactoriesMu.Lock()
+	defer customPluginFactoriesMu.Unlock()
+	if factory == nil {
+		delete(customPluginFactories, classPath)
+		return
+	}
+	customPluginFactories[classPath] = factory
+}
+
+func lookupCustomPluginFactory(classPath string) (func() RuntimeEnvPlugin, bool) {
+	customPluginFactoriesMu.RLock()
+	defer customPluginFactoriesMu.RUnlock()
+	f, ok := customPluginFactories[classPath]
+	return f, ok
+}
+
+// NewRuntimeEnvPluginManager creates a new plugin manager and loads any custom
+// plugins configured in RAY_RUNTIME_ENV_PLUGINS.
 func NewRuntimeEnvPluginManager() *RuntimeEnvPluginManager {
 	manager := &RuntimeEnvPluginManager{
 		plugins: make(map[string]*PluginSetupContext),
 	}
 
 	// Load the plugin configuration from the environment variable.
-	if pluginConfigStr := os.Getenv(RayRuntimeEnvPluginsEnvVar); pluginConfigStr != "" {
-		// Parsing JSON and loading third-party custom plugins is not
-		// implemented yet.
-		log.Log.Info("Plugin config found in environment variable", "config", pluginConfigStr)
+	if pluginConfigStr := strings.TrimSpace(os.Getenv(RayRuntimeEnvPluginsEnvVar)); pluginConfigStr != "" {
+		if err := manager.LoadPluginsFromJSON(pluginConfigStr); err != nil {
+			log.Log.Error(err, "Failed to load runtime env plugins from environment variable",
+				"env", RayRuntimeEnvPluginsEnvVar)
+		}
 	}
 
 	return manager
+}
+
+// LoadPluginsFromJSON parses a RAY_RUNTIME_ENV_PLUGINS JSON array and registers
+// all configured plugins.
+func (m *RuntimeEnvPluginManager) LoadPluginsFromJSON(raw string) error {
+	var configs []PluginConfig
+	if err := json.Unmarshal([]byte(raw), &configs); err != nil {
+		return fmt.Errorf("invalid %s JSON: %w", RayRuntimeEnvPluginsEnvVar, err)
+	}
+	return m.LoadPlugins(configs)
+}
+
+// LoadPlugins instantiates, validates, and registers each configured plugin.
+func (m *RuntimeEnvPluginManager) LoadPlugins(configs []PluginConfig) error {
+	for _, cfg := range configs {
+		classPath := strings.TrimSpace(cfg.Class)
+		if classPath == "" {
+			return fmt.Errorf("invalid runtime env plugin config: missing %q field", "class")
+		}
+		var plugin RuntimeEnvPlugin
+		if factory, ok := lookupCustomPluginFactory(classPath); ok {
+			plugin = factory()
+		} else {
+			p, err := newPythonBridgePlugin(classPath)
+			if err != nil {
+				return fmt.Errorf("load runtime env plugin %q: %w", classPath, err)
+			}
+			plugin = p
+		}
+		if err := m.ValidatePluginClass(plugin); err != nil {
+			return err
+		}
+		priority := plugin.Priority()
+		if cfg.Priority != nil {
+			priority = *cfg.Priority
+		}
+		if err := m.ValidatePriority(priority); err != nil {
+			return err
+		}
+		uriCache := m.CreateURICacheForPlugin(plugin)
+		m.pluginsMutex.Lock()
+		m.plugins[plugin.Name()] = &PluginSetupContext{
+			Name:          plugin.Name(),
+			ClassInstance: plugin,
+			Priority:      priority,
+			URICache:      uriCache,
+		}
+		m.pluginsMutex.Unlock()
+	}
+	return nil
+}
+
+// pythonBridgePlugin bridges a Python RuntimeEnvPlugin subclass into Go by
+// invoking Python over JSON stdin/stdout for each lifecycle method.
+type pythonBridgePlugin struct {
+	classPath string
+	name      string
+	priority  int
+	pythonBin string
+}
+
+var resolvePluginPython = func() string {
+	if p := strings.TrimSpace(os.Getenv("RAY_PYTHON_EXECUTABLE")); p != "" {
+		return p
+	}
+	if p, err := exec.LookPath("python3"); err == nil {
+		return p
+	}
+	return "python"
+}
+
+const pythonPluginBridgeScript = `
+import asyncio, inspect, json, sys
+from ray._common.utils import import_attr
+from ray._private.runtime_env.context import RuntimeEnvContext
+
+req = json.loads(sys.stdin.read())
+cls = import_attr(req["class"])
+op = req["op"]
+if op == "meta":
+    print(json.dumps({"name": getattr(cls, "name", "") or "", "priority": int(getattr(cls, "priority", 10))}))
+    sys.exit(0)
+inst = cls()
+if op == "validate":
+    inst.validate(req.get("runtime_env") or {})
+    print(json.dumps({"ok": True}))
+elif op == "get_uris":
+    uris = inst.get_uris(req.get("runtime_env") or {}) or []
+    print(json.dumps({"uris": list(uris)}))
+elif op == "create":
+    ctx_in = req.get("context") or {}
+    ctx = RuntimeEnvContext(
+        command_prefix=ctx_in.get("command_prefix") or [],
+        env_vars=ctx_in.get("env_vars") or {},
+        py_executable=ctx_in.get("py_executable") or "default",
+    )
+    res = inst.create(req.get("uri") or "", req.get("runtime_env") or {}, ctx, None)
+    if inspect.isawaitable(res):
+        res = asyncio.run(res)
+    print(json.dumps({
+        "size_bytes": int(res or 0),
+        "command_prefix": ctx.command_prefix,
+        "env_vars": ctx.env_vars,
+        "py_executable": ctx.py_executable,
+    }))
+elif op == "modify_context":
+    ctx_in = req.get("context") or {}
+    ctx = RuntimeEnvContext(
+        command_prefix=ctx_in.get("command_prefix") or [],
+        env_vars=ctx_in.get("env_vars") or {},
+        py_executable=ctx_in.get("py_executable") or "default",
+    )
+    inst.modify_context(req.get("uris") or [], req.get("runtime_env") or {}, ctx, None)
+    print(json.dumps({
+        "command_prefix": ctx.command_prefix,
+        "env_vars": ctx.env_vars,
+        "py_executable": ctx.py_executable,
+    }))
+elif op == "delete_uri":
+    freed = inst.delete_uri(req.get("uri") or "", None)
+    print(json.dumps({"freed_bytes": int(freed or 0)}))
+`
+
+func newPythonBridgePlugin(classPath string) (*pythonBridgePlugin, error) {
+	p := &pythonBridgePlugin{
+		classPath: classPath,
+		pythonBin: resolvePluginPython(),
+	}
+	var resp struct {
+		Name     string `json:"name"`
+		Priority int    `json:"priority"`
+	}
+	if err := p.call(context.Background(), map[string]any{"op": "meta", "class": classPath}, &resp); err != nil {
+		return nil, err
+	}
+	p.name = resp.Name
+	p.priority = resp.Priority
+	return p, nil
+}
+
+func (p *pythonBridgePlugin) call(ctx context.Context, payload map[string]any, out any) error {
+	rawIn, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, p.pythonBin, "-c", pythonPluginBridgeScript)
+	cmd.Stdin = bytes.NewReader(rawIn)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("python plugin %s op=%v failed: %w: %s", p.classPath, payload["op"], err, strings.TrimSpace(stderr.String()))
+	}
+	if out != nil {
+		if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), out); err != nil {
+			return fmt.Errorf("decode python plugin %s response: %w", p.classPath, err)
+		}
+	}
+	return nil
+}
+
+func (p *pythonBridgePlugin) Name() string  { return p.name }
+func (p *pythonBridgePlugin) Priority() int { return p.priority }
+
+func (p *pythonBridgePlugin) Validate(runtimeEnv *RuntimeEnv) error {
+	return p.call(context.Background(), map[string]any{
+		"op":          "validate",
+		"class":       p.classPath,
+		"runtime_env": runtimeEnv,
+	}, nil)
+}
+
+func (p *pythonBridgePlugin) GetURIs(runtimeEnv *RuntimeEnv) []string {
+	var resp struct {
+		URIs []string `json:"uris"`
+	}
+	if err := p.call(context.Background(), map[string]any{
+		"op":          "get_uris",
+		"class":       p.classPath,
+		"runtime_env": runtimeEnv,
+	}, &resp); err != nil {
+		log.Log.Error(err, "python plugin GetURIs failed", "class", p.classPath)
+		return nil
+	}
+	return resp.URIs
+}
+
+func (p *pythonBridgePlugin) Create(ctx context.Context, uri string, runtimeEnv *RuntimeEnv, envCtx *RuntimeEnvContext) (int64, error) {
+	var resp struct {
+		SizeBytes     int64             `json:"size_bytes"`
+		CommandPrefix []string          `json:"command_prefix"`
+		EnvVars       map[string]string `json:"env_vars"`
+		PyExecutable  string            `json:"py_executable"`
+	}
+	ctxMap := map[string]any{}
+	if envCtx != nil {
+		ctxMap["command_prefix"] = envCtx.CommandPrefix
+		ctxMap["env_vars"] = envCtx.EnvVars
+		ctxMap["py_executable"] = envCtx.PyExecutable
+	}
+	if err := p.call(ctx, map[string]any{
+		"op":          "create",
+		"class":       p.classPath,
+		"uri":         uri,
+		"runtime_env": runtimeEnv,
+		"context":     ctxMap,
+	}, &resp); err != nil {
+		return 0, err
+	}
+	if envCtx != nil {
+		envCtx.CommandPrefix = resp.CommandPrefix
+		envCtx.EnvVars = resp.EnvVars
+		envCtx.PyExecutable = resp.PyExecutable
+	}
+	return resp.SizeBytes, nil
+}
+
+func (p *pythonBridgePlugin) ModifyContext(uris []string, runtimeEnv *RuntimeEnv, envCtx *RuntimeEnvContext) error {
+	var resp struct {
+		CommandPrefix []string          `json:"command_prefix"`
+		EnvVars       map[string]string `json:"env_vars"`
+		PyExecutable  string            `json:"py_executable"`
+	}
+	ctxMap := map[string]any{}
+	if envCtx != nil {
+		ctxMap["command_prefix"] = envCtx.CommandPrefix
+		ctxMap["env_vars"] = envCtx.EnvVars
+		ctxMap["py_executable"] = envCtx.PyExecutable
+	}
+	if err := p.call(context.Background(), map[string]any{
+		"op":          "modify_context",
+		"class":       p.classPath,
+		"uris":        uris,
+		"runtime_env": runtimeEnv,
+		"context":     ctxMap,
+	}, &resp); err != nil {
+		return err
+	}
+	if envCtx != nil {
+		envCtx.CommandPrefix = resp.CommandPrefix
+		envCtx.EnvVars = resp.EnvVars
+		envCtx.PyExecutable = resp.PyExecutable
+	}
+	return nil
+}
+
+func (p *pythonBridgePlugin) DeleteURI(uri string) int64 {
+	var resp struct {
+		FreedBytes int64 `json:"freed_bytes"`
+	}
+	if err := p.call(context.Background(), map[string]any{
+		"op":    "delete_uri",
+		"class": p.classPath,
+		"uri":   uri,
+	}, &resp); err != nil {
+		log.Log.Error(err, "python plugin DeleteURI failed", "class", p.classPath)
+		return 0
+	}
+	return resp.FreedBytes
 }
 
 // ValidatePluginClass verifies that a plugin class is valid.

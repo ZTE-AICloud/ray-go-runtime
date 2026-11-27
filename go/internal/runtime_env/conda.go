@@ -16,16 +16,19 @@
 package runtime_env
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ray-project/ray/go/internal/common"
 	"github.com/ray-project/ray/go/pkg/log"
@@ -192,34 +195,155 @@ func currentRayPipSpecifier() (string, error) {
 	return getReleaseWheelURL(), nil
 }
 
-// getRayCommit returns the Ray commit hash.
+type pythonRayMetadata struct {
+	Version        string `json:"version"`
+	Commit         string `json:"commit"`
+	WheelFilename  string `json:"wheel_filename"`
+	MasterWheelURL string `json:"master_wheel_url"`
+	ReleaseWheelURL string `json:"release_wheel_url"`
+}
+
+var (
+	pythonRayMetaOnce sync.Once
+	pythonRayMeta     pythonRayMetadata
+)
+
+var probePythonRayMetadataFn = func() pythonRayMetadata {
+	py := resolvePluginPython()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	const script = `import json, ray
+from ray._private.utils import get_wheel_filename, get_master_wheel_url, get_release_wheel_url
+print(json.dumps({
+    "version": getattr(ray, "__version__", "") or "",
+    "commit": getattr(ray, "__commit__", "") or "",
+    "wheel_filename": get_wheel_filename() or "",
+    "master_wheel_url": get_master_wheel_url() or "",
+    "release_wheel_url": get_release_wheel_url() or "",
+}))`
+	cmd := exec.CommandContext(ctx, py, "-c", script)
+	out, err := cmd.Output()
+	if err != nil {
+		return pythonRayMetadata{}
+	}
+	var meta pythonRayMetadata
+	if err := json.Unmarshal(bytes.TrimSpace(out), &meta); err != nil {
+		return pythonRayMetadata{}
+	}
+	return meta
+}
+
+func getPythonRayMetadata() pythonRayMetadata {
+	pythonRayMetaOnce.Do(func() {
+		pythonRayMeta = probePythonRayMetadataFn()
+	})
+	return pythonRayMeta
+}
+
+// getRayCommit returns the Ray commit hash, checking RAY_COMMIT, the Python
+// interpreter, and finally the compiled-in RayCommit constant.
 var getRayCommit = func() string {
-	commit := os.Getenv("RAY_COMMIT")
-	if commit != "" {
+	if commit := os.Getenv("RAY_COMMIT"); commit != "" {
+		return commit
+	}
+	if commit := getPythonRayMetadata().Commit; commit != "" {
 		return commit
 	}
 	return RayCommit // Use the global variable defined in types.go.
 }
 
-// TODO: to be replaced by querying the Python interpreter for the data.
-// getRayVersion returns the Ray version.
+// getRayVersion returns the Ray version from RAY_VERSION or the Python interpreter.
 var getRayVersion = func() string {
-	return os.Getenv("RAY_VERSION")
+	if v := os.Getenv("RAY_VERSION"); v != "" {
+		return v
+	}
+	return getPythonRayMetadata().Version
 }
 
-// getWheelFilename returns the wheel file name.
+// getWheelFilename returns the wheel file name from WHEEL_FILENAME or Python.
 var getWheelFilename = func() string {
-	return os.Getenv("WHEEL_FILENAME")
+	if v := os.Getenv("WHEEL_FILENAME"); v != "" {
+		return v
+	}
+	return getPythonRayMetadata().WheelFilename
 }
 
 // getMasterWheelURL returns the wheel URL for the master build.
 var getMasterWheelURL = func() string {
-	return os.Getenv("MASTER_WHEEL_URL")
+	if v := os.Getenv("MASTER_WHEEL_URL"); v != "" {
+		return v
+	}
+	return getPythonRayMetadata().MasterWheelURL
 }
 
 // getReleaseWheelURL returns the wheel URL for the release build.
 var getReleaseWheelURL = func() string {
-	return os.Getenv("RELEASE_WHEEL_URL")
+	if v := os.Getenv("RELEASE_WHEEL_URL"); v != "" {
+		return v
+	}
+	return getPythonRayMetadata().ReleaseWheelURL
+}
+
+// ApplyRuntimeEnvHook invokes the hook configured in RAY_RUNTIME_ENV_HOOK
+// (for example, ray._private.runtime_env.uv_runtime_env_hook.hook) on re and
+// returns the transformed RuntimeEnv. When RAY_RUNTIME_ENV_HOOK is unset, re is
+// returned unchanged.
+func ApplyRuntimeEnvHook(ctx context.Context, re *RuntimeEnv) (*RuntimeEnv, error) {
+	hookPath := strings.TrimSpace(os.Getenv("RAY_RUNTIME_ENV_HOOK"))
+	if hookPath == "" || re == nil {
+		return re, nil
+	}
+	rawIn, err := json.Marshal(re)
+	if err != nil {
+		return nil, fmt.Errorf("marshal runtime_env for hook %q: %w", hookPath, err)
+	}
+	const script = `import json, sys
+from ray._common.utils import import_attr
+req = json.loads(sys.stdin.read())
+hook = import_attr(req["hook"])
+out = hook(req["runtime_env"])
+print(json.dumps(out if out is not None else req["runtime_env"]))`
+	payload, err := json.Marshal(map[string]any{
+		"hook":        hookPath,
+		"runtime_env": json.RawMessage(rawIn),
+	})
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, resolvePluginPython(), "-c", script)
+	cmd.Stdin = bytes.NewReader(payload)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("RAY_RUNTIME_ENV_HOOK %q failed: %w: %s", hookPath, err, strings.TrimSpace(stderr.String()))
+	}
+	var transformed RuntimeEnv
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &transformed); err != nil {
+		return nil, fmt.Errorf("decode RAY_RUNTIME_ENV_HOOK %q output: %w", hookPath, err)
+	}
+	return &transformed, nil
+}
+
+// ApplyWorkerProcessSetupHook validates worker_process_setup_hook in re and
+// records it in envCtx.EnvVars so the spawned worker can execute the hook.
+func ApplyWorkerProcessSetupHook(re *RuntimeEnv, envCtx *RuntimeEnvContext) error {
+	if re == nil || envCtx == nil {
+		return nil
+	}
+	raw, ok := (*re)[FieldWorkerProcessSetupHook]
+	if !ok || raw == nil {
+		return nil
+	}
+	hookStr, ok := raw.(string)
+	if !ok || strings.TrimSpace(hookStr) == "" {
+		return fmt.Errorf("%s must be a non-empty string", FieldWorkerProcessSetupHook)
+	}
+	if envCtx.EnvVars == nil {
+		envCtx.EnvVars = make(map[string]string)
+	}
+	envCtx.EnvVars["RAY_WORKER_PROCESS_SETUP_HOOK"] = hookStr
+	return nil
 }
 
 // injectDependencies adds Ray, Python, and (optionally) extra pip dependencies to the conda dict.

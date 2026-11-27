@@ -16,9 +16,11 @@
 package runtime_env
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -162,5 +164,62 @@ func TestGetRaySetupSpecErrorHandling(t *testing.T) {
 	_, err := _getRaySetupSpec()
 	if err == nil {
 		t.Error("_getRaySetupSpec() expected error for nonexistent setup.py, got nil")
+	}
+}
+
+func TestPythonRayMetadataFallback(t *testing.T) {
+	t.Setenv("RAY_VERSION", "")
+	t.Setenv("WHEEL_FILENAME", "")
+	t.Setenv("MASTER_WHEEL_URL", "")
+	t.Setenv("RELEASE_WHEEL_URL", "")
+
+	origProbe := probePythonRayMetadataFn
+	defer func() {
+		probePythonRayMetadataFn = origProbe
+		pythonRayMetaOnce = sync.Once{}
+		pythonRayMeta = pythonRayMetadata{}
+	}()
+	pythonRayMetaOnce = sync.Once{}
+	probePythonRayMetadataFn = func() pythonRayMetadata {
+		return pythonRayMetadata{
+			Version:         "2.53.0",
+			Commit:          "abc123",
+			WheelFilename:   "ray-2.53.0-cp311-cp311-manylinux2014_x86_64.whl",
+			MasterWheelURL:  "https://example.com/master.whl",
+			ReleaseWheelURL: "https://example.com/release.whl",
+		}
+	}
+
+	if got := getRayVersion(); got != "2.53.0" {
+		t.Errorf("getRayVersion() = %q, want 2.53.0", got)
+	}
+	if got := getWheelFilename(); got != "ray-2.53.0-cp311-cp311-manylinux2014_x86_64.whl" {
+		t.Errorf("getWheelFilename() = %q", got)
+	}
+	if got := getMasterWheelURL(); got != "https://example.com/master.whl" {
+		t.Errorf("getMasterWheelURL() = %q", got)
+	}
+	if got := getReleaseWheelURL(); got != "https://example.com/release.whl" {
+		t.Errorf("getReleaseWheelURL() = %q", got)
+	}
+}
+
+func TestApplyRuntimeEnvHookUnsetAndSetupHook(t *testing.T) {
+	t.Setenv("RAY_RUNTIME_ENV_HOOK", "")
+	re := &RuntimeEnv{FieldWorkerProcessSetupHook: "my_pkg.setup_hook"}
+	out, err := ApplyRuntimeEnvHook(context.Background(), re)
+	if err != nil {
+		t.Fatalf("ApplyRuntimeEnvHook: %v", err)
+	}
+	if out != re {
+		t.Fatal("expected ApplyRuntimeEnvHook to return original pointer when unset")
+	}
+
+	envCtx := &RuntimeEnvContext{}
+	if err := ApplyWorkerProcessSetupHook(re, envCtx); err != nil {
+		t.Fatalf("ApplyWorkerProcessSetupHook: %v", err)
+	}
+	if envCtx.EnvVars["RAY_WORKER_PROCESS_SETUP_HOOK"] != "my_pkg.setup_hook" {
+		t.Errorf("RAY_WORKER_PROCESS_SETUP_HOOK = %q, want my_pkg.setup_hook", envCtx.EnvVars["RAY_WORKER_PROCESS_SETUP_HOOK"])
 	}
 }
