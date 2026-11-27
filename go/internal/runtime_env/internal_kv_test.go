@@ -433,28 +433,42 @@ func TestInternalKVExists_NoClient(t *testing.T) {
 
 // ============ PinRuntimeEnvURICall tests ============
 
-func TestPinRuntimeEnvURICall_NotImplemented(t *testing.T) {
+func TestPinRuntimeEnvURICall_Success(t *testing.T) {
 	defer InternalKVReset()
 
+	var gotURI string
+	var gotExp int
 	mockClient := &MockGCSClient{
 		PinURIFunc: func(ctx context.Context, uri string, expirationS int) error {
+			gotURI = uri
+			gotExp = expirationS
 			return nil
 		},
 	}
 	_ = InitializeInternalKV(mockClient)
 
 	ctx := context.Background()
-	err := PinRuntimeEnvURICall(ctx, "test-uri", 3600)
-
-	// The gcs.Client interface exposes no pin method, so the bridge cannot yet
-	// acquire a pin. It must report the gap instead of pretending success:
-	// a nil error here would let the GCS runtime-env garbage collector delete
-	// an uploaded package another node still references.
-	if err == nil {
-		t.Error("expected pin call to report the unimplemented bridge, got nil")
+	if err := PinRuntimeEnvURICall(ctx, "gcs://pkg.zip", 3600); err != nil {
+		t.Fatalf("PinRuntimeEnvURICall returned unexpected error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "not implemented by the GCS bridge") {
-		t.Errorf("expected 'not implemented by the GCS bridge' error, got %v", err)
+	if gotURI != "gcs://pkg.zip" || gotExp != 3600 {
+		t.Fatalf("PinRuntimeEnvURI called with (%q, %d), want (%q, %d)", gotURI, gotExp, "gcs://pkg.zip", 3600)
+	}
+}
+
+func TestPinRuntimeEnvURICall_ErrorPropagation(t *testing.T) {
+	defer InternalKVReset()
+
+	mockClient := &MockGCSClient{
+		PinURIFunc: func(ctx context.Context, uri string, expirationS int) error {
+			return errors.New("gcs pin failed")
+		},
+	}
+	_ = InitializeInternalKV(mockClient)
+
+	err := PinRuntimeEnvURICall(context.Background(), "gcs://pkg.zip", 60)
+	if err == nil || !strings.Contains(err.Error(), "gcs pin failed") {
+		t.Fatalf("expected error containing 'gcs pin failed', got %v", err)
 	}
 }
 

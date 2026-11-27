@@ -22,6 +22,7 @@ package gcsgrpc
 import (
 	"context"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"strconv"
@@ -40,10 +41,11 @@ import (
 // gcs.ErrorInfoPublisher, gcs.NodeResourceUsagePublisher and the
 // plugin.GCSHandshakeClient subset (GetNodeToConnect / NextJobID).
 type Client struct {
-	conn      *grpc.ClientConn
-	clusterID string
-	kv        proto.InternalKVGcsServiceClient
-	pubsub    proto.ObservabilityPubSubServiceClient
+	conn       *grpc.ClientConn
+	clusterID  string
+	kv         proto.InternalKVGcsServiceClient
+	pubsub     proto.ObservabilityPubSubServiceClient
+	runtimeEnv proto.RuntimeEnvGcsServiceClient
 }
 
 // NewClient dials GCS and initializes the KV and pubsub service clients.
@@ -89,7 +91,8 @@ func NewClient(ctx context.Context, opts gcs.ClientOptions) (*Client, error) {
 		// subscriber uses. InternalPubSubGcsService exists only in the proto
 		// and is never registered by the Ray GCS server, so publishing
 		// through it fails with Unimplemented.
-		pubsub: proto.NewObservabilityPubSubServiceClient(conn),
+		pubsub:     proto.NewObservabilityPubSubServiceClient(conn),
+		runtimeEnv: proto.NewRuntimeEnvGcsServiceClient(conn),
 	}, nil
 }
 
@@ -153,6 +156,29 @@ func (c *Client) PublishLogBatch(ctx context.Context, payload gcs.LogBatchPayloa
 
 // Close closes the underlying gRPC connection.
 func (c *Client) Close() error { return c.conn.Close() }
+
+// PinRuntimeEnvURI pins a runtime environment package URI in GCS for
+// expirationS seconds via RuntimeEnvGcsService.PinRuntimeEnvURI.
+func (c *Client) PinRuntimeEnvURI(ctx context.Context, uri string, expirationS int) error {
+	if c.runtimeEnv == nil {
+		return fmt.Errorf("runtime env gcs service client is not initialized")
+	}
+	if expirationS < 0 || expirationS > math.MaxInt32 {
+		return fmt.Errorf("pin runtime env uri %q: invalid expiration %d", uri, expirationS)
+	}
+	reply, err := c.runtimeEnv.PinRuntimeEnvURI(c.withClusterID(ctx), &proto.PinRuntimeEnvURIRequest{
+		Uri:         uri,
+		ExpirationS: int32(expirationS),
+	})
+	if err != nil {
+		return fmt.Errorf("pin runtime env uri %q: %w", uri, err)
+	}
+	if reply.GetStatus() != nil && reply.GetStatus().GetCode() != 0 {
+		return fmt.Errorf("pin runtime env uri %q: status code %d: %s",
+			uri, reply.GetStatus().GetCode(), reply.GetStatus().GetMessage())
+	}
+	return nil
+}
 
 // The methods below extend the pure-Go GCS client with the method set the
 // dashboard agent needs beyond the log monitor's KV-read + log-publish subset.

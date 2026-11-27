@@ -23,6 +23,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//go/internal/common",
+        "//go/internal/gcs/grpc",
         "//go/internal/runtime_env",
         "//go/internal/runtime_env/agent",
         "//go/pkg/gcs",

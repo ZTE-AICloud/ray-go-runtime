@@ -633,3 +633,34 @@ func TestValidatePluginClassWithRealPlugin(t *testing.T) {
 		t.Errorf("Unexpected error validating priority: %v", err)
 	}
 }
+
+func TestLoadPluginsFromEnvVarAndJSON(t *testing.T) {
+	const classPath = "custom.test.Plugin"
+	RegisterCustomPluginFactory(classPath, func() RuntimeEnvPlugin {
+		return newMockPlugin("custom_plugin", 15)
+	})
+	defer RegisterCustomPluginFactory(classPath, nil)
+
+	t.Setenv(RayRuntimeEnvPluginsEnvVar, `[{"class":"custom.test.Plugin","priority":25}]`)
+	manager := NewRuntimeEnvPluginManager()
+
+	ctx, ok := manager.GetPlugin("custom_plugin")
+	if !ok {
+		t.Fatal("expected custom_plugin to be loaded from RAY_RUNTIME_ENV_PLUGINS")
+	}
+	if ctx.Priority != 25 {
+		t.Errorf("priority = %d, want 25", ctx.Priority)
+	}
+
+	// Invalid JSON, missing class, out-of-range priority should error.
+	m2 := NewRuntimeEnvPluginManager()
+	if err := m2.LoadPluginsFromJSON("not-json"); err == nil {
+		t.Error("expected error for invalid JSON")
+	}
+	if err := m2.LoadPluginsFromJSON(`[{"priority":10}]`); err == nil {
+		t.Error("expected error for missing class field")
+	}
+	if err := m2.LoadPluginsFromJSON(`[{"class":"custom.test.Plugin","priority":200}]`); err == nil {
+		t.Error("expected error for out-of-range priority")
+	}
+}

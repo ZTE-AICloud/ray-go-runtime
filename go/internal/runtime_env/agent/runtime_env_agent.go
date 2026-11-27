@@ -357,6 +357,13 @@ func (s *RuntimeEnvAgentService) GetOrCreateRuntimeEnv(
 			ErrorMessage: fmt.Sprintf("[Node %s] %s", s.nodeIP, err.Error()),
 		}, nil
 	}
+	runtimeEnv, err = runtime_env.ApplyRuntimeEnvHook(ctx, runtimeEnv)
+	if err != nil {
+		return &runtime_env_agent_pb.GetOrCreateRuntimeEnvReply{
+			Status:       runtime_env_agent_pb.AgentRpcStatus_AGENT_RPC_STATUS_FAILED,
+			ErrorMessage: fmt.Sprintf("[Node %s] %s", s.nodeIP, err.Error()),
+		}, nil
+	}
 
 	s.referenceTable.IncreaseReference(runtimeEnv, serializedEnv, request.SourceProcess)
 
@@ -536,6 +543,9 @@ func (s *RuntimeEnvAgentService) setupRuntimeEnv(
 	}
 
 	context := runtime_env.NewRuntimeEnvContext(envVars)
+	if err := runtime_env.ApplyWorkerProcessSetupHook(runtimeEnv, context); err != nil {
+		return nil, err
+	}
 
 	// If runtimeEnv is nil, re-create and initialize an empty RuntimeEnv.
 	if runtimeEnv == nil {
