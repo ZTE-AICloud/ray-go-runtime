@@ -280,13 +280,13 @@ func TestInitCloudInstanceProvider_Readonly(t *testing.T) {
 	assert.IsType(t, &cloud_providers.ReadOnlyProvider{}, provider)
 }
 
-// TestInitCloudInstanceProvider_KubeRayNotImplemented expects the kuberay branch
-// entry to be preserved and return an error for now.
-func TestInitCloudInstanceProvider_KubeRayNotImplemented(t *testing.T) {
+// TestInitCloudInstanceProvider_KubeRay verifies KubeRayProvider initialization
+// validates required config fields instead of returning unimplemented.
+func TestInitCloudInstanceProvider_KubeRay(t *testing.T) {
 	_, err := initCloudInstanceProvider(newProviderConfigConfig("kuberay"), nil)
 
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "kuberay provider not implemented")
+	assert.Contains(t, err.Error(), "cluster_name")
 }
 
 // TestInitCloudInstanceProvider_Local expects LocalProvider for the local type,

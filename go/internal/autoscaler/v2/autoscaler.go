@@ -179,10 +179,10 @@ func initCloudInstanceProvider(
 ) (autoscaler.ICloudInstanceProvider, error) {
 	switch config.GetProvider() {
 	case instance_manager.ProviderKubeRay:
-		// TODO: port the KubeRayProvider (patching the workerGroupSpecs.replicas
-		//       and scaleStrategy.workersToDelete of the RayCluster CRD through
-		//       the K8s API).
-		return nil, fmt.Errorf("kuberay provider not implemented yet")
+		providerConfig := autoscaler.GetValueWithDefault[map[string]interface{}](
+			config.Configs, map[string]interface{}{}, "provider")
+		clusterName, _ := config.GetConfig("cluster_name", "").(string)
+		return cloud_providers.NewKubeRayProvider(clusterName, providerConfig)
 
 	case instance_manager.ProviderReadOnly:
 		// The read-only provider is fully implemented; it suits local private Ray

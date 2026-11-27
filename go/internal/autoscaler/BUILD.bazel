@@ -26,7 +26,14 @@ go_library(
         "providers.go",
         "utils.go",
     ],
-    embedsrcs = ["ray-schema.json"],
+    embedsrcs = [
+        "cloud_defaults/aliyun.yaml",
+        "cloud_defaults/aws.yaml",
+        "cloud_defaults/azure.yaml",
+        "cloud_defaults/gcp.yaml",
+        "cloud_defaults/vsphere.yaml",
+        "ray-schema.json",
+    ],
     importpath = "github.com/ray-project/ray/go/internal/autoscaler",
     visibility = ["//go:__subpackages__"],
     deps = [

@@ -16,6 +16,7 @@ package autoscaler
 
 import (
 	"bytes"
+	"embed"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -62,14 +63,26 @@ func loadLocalDefaultsConfig() ([]byte, error) {
 // configLoaderFunc is the type of a config loading function.
 type configLoaderFunc func() ([]byte, error)
 
+//go:embed cloud_defaults/*.yaml
+var cloudDefaultsFS embed.FS
+
+func loadCloudDefaultsConfig(provider string) configLoaderFunc {
+	return func() ([]byte, error) {
+		return cloudDefaultsFS.ReadFile("cloud_defaults/" + provider + ".yaml")
+	}
+}
+
 // DEFAULT_CONFIGS maps provider types to their config loading functions.
-// TODO: the aws, gcp, azure, aliyun and vsphere provider types are not
-// registered here.
 var DEFAULT_CONFIGS = map[string]configLoaderFunc{
 	"fake_multinode":        loadFakeMultinodeDefaultsConfig,
 	"fake_multinode_docker": loadFakeMultinodeDockerDefaultsConfig,
 	"local":                 loadLocalDefaultsConfig,
 	"readonly":              loadReadonlyDefaultsConfig,
+	"aws":                   loadCloudDefaultsConfig("aws"),
+	"gcp":                   loadCloudDefaultsConfig("gcp"),
+	"azure":                 loadCloudDefaultsConfig("azure"),
+	"aliyun":                loadCloudDefaultsConfig("aliyun"),
+	"vsphere":               loadCloudDefaultsConfig("vsphere"),
 }
 
 // GetDefaultConfig returns the default config for the given provider type.
