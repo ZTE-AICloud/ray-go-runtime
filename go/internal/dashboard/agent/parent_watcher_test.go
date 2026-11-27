@@ -583,3 +583,77 @@ func writeRayletLog(t *testing.T, dir, content string) {
 		t.Fatal(err)
 	}
 }
+
+func TestStartParentWatcherDoneClosesWithoutPID(t *testing.T) {
+	t.Setenv(rayletPIDEnvName, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := StartParentWatcher(ctx, cancel, t.TempDir(), nil)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("watcher done channel should be closed when there is no raylet pid")
+	}
+}
+
+type blockingErrorPublisher struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p *blockingErrorPublisher) PublishErrorInfo(_ context.Context, _ string, _ gcs.ErrorInfoPayload) error {
+	close(p.started)
+	<-p.release
+	return nil
+}
+
+func TestStartParentWatcherDoneWaitsForDeathReport(t *testing.T) {
+	t.Setenv(rayletPIDEnvName, "99999")
+	t.Setenv(parentCheckIntervalSEnvName, "0.01")
+	t.Setenv(pipeHealthCheckEnvName, "0")
+	stubParentPid(t, func() int { return 12345 })
+
+	dir := t.TempDir()
+	writeRayletLog(t, dir, "crash line\n")
+	pub := &blockingErrorPublisher{started: make(chan struct{}), release: make(chan struct{})}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := StartParentWatcher(ctx, cancel, dir, pub)
+
+	select {
+	case <-pub.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("death report did not reach the publisher")
+	}
+	// Fate-sharing must not wait for the report: ctx is cancelled first.
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("context was not cancelled before the death report finished")
+	}
+	// The watcher done channel must not close while the publish is blocked.
+	select {
+	case <-done:
+		t.Fatal("watcher done closed before the death report finished")
+	default:
+	}
+	close(pub.release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher done did not close after the death report finished")
+	}
+}
+
+func TestWaitParentWatcher(t *testing.T) {
+	if WaitParentWatcher(make(chan struct{}), 10*time.Millisecond) {
+		t.Fatal("WaitParentWatcher returned true for open channel")
+	}
+	if !WaitParentWatcher(closedSignal(), time.Second) {
+		t.Fatal("WaitParentWatcher returned false for closed channel")
+	}
+	if !WaitParentWatcher(nil, time.Second) {
+		t.Fatal("WaitParentWatcher returned false for nil channel")
+	}
+}

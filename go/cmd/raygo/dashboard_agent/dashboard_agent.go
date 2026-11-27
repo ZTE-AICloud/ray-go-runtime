@@ -352,7 +352,12 @@ func runDashboardAgent(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to connect to GCS client: %w", err)
 	}
-	defer gcsClient.Close()
+	closeGCS := true
+	defer func() {
+		if closeGCS {
+			gcsClient.Close()
+		}
+	}()
 
 	cfg.GCS = gcsClient
 
@@ -373,8 +378,16 @@ func runDashboardAgent(ctx context.Context) error {
 	// agent down when the raylet dies, mirroring the Python dashboard agent's
 	// create_check_raylet_task.
 	runCtx, cancel := context.WithCancel(ctx)
+	watcherDone := agent.StartParentWatcher(runCtx, cancel, cfg.LogDir, agent.ResolveErrorPublisher(*cfg))
+	defer func() {
+		if !agent.WaitParentWatcher(watcherDone, agent.ParentWatcherDrainTimeout) {
+			closeGCS = false
+			log.Log.Info("raylet death report still in flight; skipping GCS client close")
+		}
+	}()
+	// Registered after the wait defer so cancellation happens first on every
+	// return path, letting an idle watcher exit before the wait.
 	defer cancel()
-	agent.StartParentWatcher(runCtx, cancel, cfg.LogDir, agent.ResolveErrorPublisher(*cfg))
 
 	mods, err := buildModules(*cfg)
 	if err != nil {
