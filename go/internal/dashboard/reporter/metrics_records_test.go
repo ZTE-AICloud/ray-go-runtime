@@ -842,3 +842,72 @@ func TestMergeTagsLastWins(t *testing.T) {
 		t.Errorf("mergeTags size = %d, want %d (%v)", len(got), len(want), got)
 	}
 }
+
+// TestAsTypeCoercionsDegrade verifies the tolerant stats value coercions return
+// their zero value for unrecognized types instead of panicking, so a malformed
+// stats field never fails a collection cycle.
+func TestAsTypeCoercionsDegrade(t *testing.T) {
+	t.Run("asFloat", func(t *testing.T) {
+		cases := map[string]struct {
+			in   interface{}
+			want float64
+		}{
+			"float64":     {in: float64(1.5), want: 1.5},
+			"float32":     {in: float32(1.5), want: 1.5},
+			"int":         {in: 2, want: 2},
+			"int32":       {in: int32(3), want: 3},
+			"int64":       {in: int64(4), want: 4},
+			"uint64":      {in: uint64(5), want: 5},
+			"unsupported": {in: "1.5", want: 0},
+			"nil":         {in: nil, want: 0},
+		}
+		for name, tc := range cases {
+			if got := asFloat(tc.in); got != tc.want {
+				t.Errorf("asFloat(%s=%v) = %v, want %v", name, tc.in, got, tc.want)
+			}
+		}
+	})
+
+	t.Run("asInt", func(t *testing.T) {
+		cases := map[string]struct {
+			in   interface{}
+			want int
+		}{
+			"int":         {in: 1, want: 1},
+			"int32":       {in: int32(2), want: 2},
+			"int64":       {in: int64(3), want: 3},
+			"float64":     {in: 4.9, want: 4},
+			"unsupported": {in: "4", want: 0},
+			"nil":         {in: nil, want: 0},
+		}
+		for name, tc := range cases {
+			if got := asInt(tc.in); got != tc.want {
+				t.Errorf("asInt(%s=%v) = %v, want %v", name, tc.in, got, tc.want)
+			}
+		}
+	})
+
+	t.Run("asString", func(t *testing.T) {
+		if got := asString("ok"); got != "ok" {
+			t.Errorf("asString(string) = %q, want ok", got)
+		}
+		if got := asString(42); got != "" {
+			t.Errorf("asString(42) = %q, want empty for a non-string", got)
+		}
+		if got := asString(nil); got != "" {
+			t.Errorf("asString(nil) = %q, want empty", got)
+		}
+	})
+
+	t.Run("asStringSlice", func(t *testing.T) {
+		if got := asStringSlice([]string{"a"}); len(got) != 1 || got[0] != "a" {
+			t.Errorf("asStringSlice([]string) = %v, want [a]", got)
+		}
+		if got := asStringSlice([]interface{}{"a"}); got != nil {
+			t.Errorf("asStringSlice([]interface{}) = %v, want nil", got)
+		}
+		if got := asStringSlice(nil); got != nil {
+			t.Errorf("asStringSlice(nil) = %v, want nil", got)
+		}
+	})
+}

@@ -864,3 +864,32 @@ func TestReporterModuleFetchClusterStatsReadErrorIsReported(t *testing.T) {
 		t.Error("a genuine read error must still be logged as an error")
 	}
 }
+
+// TestAsNodeResourceUsagePublisherNil verifies the nil guard of the publisher
+// type assertion: a nil client is never a usable publisher.
+func TestAsNodeResourceUsagePublisherNil(t *testing.T) {
+	if p, ok := asNodeResourceUsagePublisher(nil); ok || p != nil {
+		t.Errorf("asNodeResourceUsagePublisher(nil) = (%v, %v), want (nil, false)", p, ok)
+	}
+}
+
+// TestNoopPublisherDropsPublications verifies the fallback publisher accepts and
+// drops publications silently so the module always has a non-nil publisher.
+func TestNoopPublisherDropsPublications(t *testing.T) {
+	var p noopPublisher
+	if err := p.PublishNodeResourceUsage(context.Background(), "k", "v"); err != nil {
+		t.Errorf("noopPublisher.PublishNodeResourceUsage returned %v, want nil", err)
+	}
+}
+
+// TestReporterModulePublishCycleSurvivesPublishError verifies a failed
+// publication is logged but does not stop the collection loop: publishCycle
+// reports true so the caller keeps running, matching the Python _run_loop which
+// catches exceptions per iteration.
+func TestReporterModulePublishCycleSurvivesPublishError(t *testing.T) {
+	m, pub := newTestReporterModule(t, agent.Config{LogDir: t.TempDir()})
+	pub.publishFn = func(keyID, jsonPayload string) error { return errors.New("publish boom") }
+	if !m.publishCycle(context.Background()) {
+		t.Error("publishCycle returned false on a publish error, want true (loop keeps running)")
+	}
+}
