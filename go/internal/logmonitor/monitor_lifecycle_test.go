@@ -15,6 +15,7 @@
 package logmonitor
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -85,14 +86,21 @@ func TestUpdateLogFilenamesWorkerOrderingParity(t *testing.T) {
 	for _, fileInfo := range m.closedFiles {
 		got = append(got, filepath.Base(fileInfo.filename))
 	}
-	want := []string{
-		"worker-b-01000000-10002.out",
-		"worker-b-01000000-10002.err",
-		"worker-a-01000000-10001.out",
-		"worker-a-01000000-10001.err",
+	// Preserve single-pass directory order for worker*[.out|.err] rather than
+	// splitting .out and .err into separate passes (filesystem directory order
+	// varies across tmpfs/ext4/xfs).
+	entries, err := readDirEntries(logsDir)
+	if err != nil {
+		t.Fatalf("readDirEntries() error = %v", err)
 	}
-	if len(got) != len(want) {
-		t.Fatalf("closedFiles len = %d, want %d (%v)", len(got), len(want), got)
+	want := make([]string, 0, 4)
+	for _, e := range entries {
+		if matchesPath("worker*[.out|.err]", e.name) {
+			want = append(want, e.name)
+		}
+	}
+	if len(got) != 4 || len(want) != 4 {
+		t.Fatalf("closedFiles len = %d, want 4 (%v)", len(got), got)
 	}
 	for i := range want {
 		if got[i] != want[i] {
@@ -302,5 +310,67 @@ func TestUpdateLogFilenamesLogsTrackedFiles(t *testing.T) {
 	}
 	if !strings.Contains(string(content), "Beginning to track file raylet.err") {
 		t.Fatalf("track-file log missing: %q", string(content))
+	}
+}
+
+func TestShouldUpdateFilenamesThrottlesOnLargeDirectory(t *testing.T) {
+	logsDir := t.TempDir()
+	// Create untracked Go core worker logs exceeding manyFilesThreshold.
+	for i := 0; i < 15; i++ {
+		createLogFile(t, logsDir, fmt.Sprintf("go-core-worker-abc_%d.log", 2000000+i), "log\n")
+	}
+
+	m, err := NewWithConfig("127.0.0.1", logsDir, &recordingPublisher{}, RuntimeConfig{
+		ManyFilesThreshold: 10,
+		NameUpdateInterval: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewWithConfig() error = %v", err)
+	}
+	m.sleep = func(time.Duration) {}
+
+	if err := m.updateLogFilenames(); err != nil {
+		t.Fatalf("updateLogFilenames() error = %v", err)
+	}
+	now := time.Now()
+	m.lastFilenameUpdateTime = now
+
+	if m.shouldUpdateFilenames(now.Add(100 * time.Millisecond)) {
+		t.Fatal("shouldUpdateFilenames() = true with large untracked dir within interval, want false")
+	}
+	if !m.shouldUpdateFilenames(now.Add(6 * time.Second)) {
+		t.Fatal("shouldUpdateFilenames() = false after nameUpdateInterval elapsed, want true")
+	}
+}
+
+func BenchmarkUpdateLogFilenamesLargeDir(b *testing.B) {
+	logsDir := b.TempDir()
+	for i := 0; i < 5000; i++ {
+		p := filepath.Join(logsDir, fmt.Sprintf("go-core-worker-dead_%d.log", 2000000+i))
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			b.Fatal(err)
+		}
+	}
+	for i := 0; i < 500; i++ {
+		p := filepath.Join(logsDir, fmt.Sprintf("worker-dead-01000000-%d.out", 2100000+i))
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	m, err := New("127.0.0.1", logsDir, &recordingPublisher{})
+	if err != nil {
+		b.Fatal(err)
+	}
+	m.sleep = func(time.Duration) {}
+	if err := m.updateLogFilenames(); err != nil {
+		b.Fatal(err)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := m.updateLogFilenames(); err != nil {
+			b.Fatal(err)
+		}
 	}
 }

@@ -43,6 +43,7 @@ type Monitor struct {
 	runtimeEnvToDriver     bool
 	autoscalerV2Enabled    bool
 	lastFilenameUpdateTime time.Time
+	lastScannedDirEntries  int
 	lastPublishErrLog      time.Time
 	isProcAlive            func(pid int) bool
 	gc                     *GarbageCollector
@@ -155,7 +156,7 @@ func (m *Monitor) Run(ctx context.Context) error {
 }
 
 func (m *Monitor) shouldUpdateFilenames(now time.Time) bool {
-	if len(m.tracked) < m.manyFilesThreshold {
+	if len(m.tracked) < m.manyFilesThreshold && m.lastScannedDirEntries < m.manyFilesThreshold {
 		return true
 	}
 	return now.Sub(m.lastFilenameUpdateTime) > m.nameUpdateInterval
@@ -168,23 +169,32 @@ func (m *Monitor) updateLogFilenames() error {
 	tpuDirInfo, err := os.Stat(filepath.Join(m.logsDir, "tpu_logs"))
 	tpuDirExists := err == nil && tpuDirInfo.IsDir()
 
-	candidates, err := orderedLogPaths(m.logsDir, m.autoscalerV2Enabled, m.runtimeEnvToDriver, tpuDirExists)
+	candidates, totalEntries, err := orderedLogPaths(m.logsDir, m.autoscalerV2Enabled, m.runtimeEnvToDriver, tpuDirExists)
 	if err != nil {
 		return err
 	}
-	for _, path := range candidates {
-		info, err := os.Stat(path)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return err
-		}
-		if !info.Mode().IsRegular() && info.Mode()&fs.ModeSymlink == 0 {
-			continue
-		}
+	m.lastScannedDirEntries = totalEntries
+
+	for _, c := range candidates {
+		path := c.path
 		if _, exists := m.tracked[path]; exists {
 			continue
+		}
+		// Only skip os.Stat for entries ReadDir reported as plain regular files
+		// (fromDir == true && typ == 0). Synthetic paths, symlinks, DT_UNKNOWN
+		// (ModeIrregular), directories, and FIFOs all go through os.Stat and
+		// the mode check below.
+		if !c.fromDir || c.typ != 0 {
+			info, err := os.Stat(path)
+			if err != nil {
+				if os.IsNotExist(err) {
+					continue
+				}
+				return err
+			}
+			if !info.Mode().IsRegular() && info.Mode()&fs.ModeSymlink == 0 {
+				continue
+			}
 		}
 
 		fileInfo := &logFileInfo{

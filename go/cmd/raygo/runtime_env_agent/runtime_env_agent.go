@@ -34,22 +34,17 @@ import (
 	"github.com/ray-project/ray/go/pkg/log"
 	"github.com/ray-project/ray/go/pkg/log/logconfig"
 	"github.com/ray-project/ray/go/pkg/log/zap"
-	"github.com/ray-project/ray/go/pkg/runtime/plugin"
 	"github.com/spf13/cobra"
 )
 
 // runtimeGOOS allows tests to override the platform behavior.
 var runtimeGOOS = runtime.GOOS
 
-// connectGCSClient is the factory used to create GCS client connections; tests
-// can replace it with a fake.
+// connectGCSClient is the factory used to create pure-Go GCS gRPC client
+// connections (no go_runtime.so required); tests can replace it with a fake.
 var connectGCSClient = func(opts gcs.ClientOptions) (gcs.Client, error) {
-	return plugin.LoadGCSClient(opts)
+	return grpcgcs.NewClient(context.Background(), opts)
 }
-
-// validatePluginLoadableFn wraps plugin.CheckPluginLoadable (the startup
-// plugin loadability pre-check) so tests can inject a fake.
-var validatePluginLoadableFn = plugin.CheckPluginLoadable
 
 // Flags for the runtime-env-agent command.
 var (
@@ -143,11 +138,6 @@ func GetRuntimeEnvAgentCmd() *cobra.Command {
 
 // runRuntimeEnvAgent runs the runtime env agent.
 func runRuntimeEnvAgent(ctx context.Context) error {
-	// Fail fast on deployment errors (missing/invalid go_runtime.so).
-	if err := validatePluginLoadableFn(); err != nil {
-		return err
-	}
-
 	if pythonExecutable != "" {
 		runtime_env.PythonExecutable = pythonExecutable
 	}
@@ -211,22 +201,12 @@ func runRuntimeEnvAgent(ctx context.Context) error {
 		TimeoutMs: 60000, // 60s timeout.
 	}
 
-	// Create the GCS client via ConnectClient.
+	// Create the pure-Go GCS gRPC client (implements gcs.Client and gcs.RuntimeEnvURIPinner).
 	gcsClient, err := connectGCSClient(opts)
 	if err != nil {
 		return fmt.Errorf("failed to connect to GCS client: %v", err)
 	}
-	if _, ok := gcsClient.(gcs.RuntimeEnvURIPinner); !ok {
-		if pinnerClient, perr := grpcgcs.NewClient(ctx, opts); perr == nil {
-			runtime_env.SetRuntimeEnvURIPinner(pinnerClient)
-			defer func() {
-				runtime_env.SetRuntimeEnvURIPinner(nil)
-				_ = pinnerClient.Close()
-			}()
-		} else {
-			log.Log.V(1).Info("Pure-Go GCS URI pinner unavailable; PinRuntimeEnvURI will fall back to GCS client", "err", perr)
-		}
-	}
+	defer gcsClient.Close()
 
 	// 2. Create the agent service.
 	config := &agent.RuntimeEnvAgentConfig{

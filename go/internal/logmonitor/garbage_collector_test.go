@@ -613,3 +613,32 @@ func TestGcEndToEndKeepsLiveProcessFile(t *testing.T) {
 	}
 	_ = handle.Close()
 }
+
+func TestGcCollectsHighPIDAndGoLogFamilies(t *testing.T) {
+	dir := t.TempDir()
+	files := []string{
+		"worker-abc123-01000000-2587181.out",
+		"worker-abc123-01000000-2587181.err",
+		"go-core-worker-d4ed9d47_2587182.log",
+		"go-core-driver-15000000_2587183.log",
+		"ray_go_2587184.log",
+	}
+	var paths []string
+	for _, name := range files {
+		p := createFileOfSize(t, dir, name, 128)
+		touchFileAge(t, p, 999999*time.Second)
+		paths = append(paths, p)
+	}
+	// Live Go worker file must be kept.
+	livePath := createFileOfSize(t, dir, "go-core-worker-deadbeef_2587999.log", 128)
+	touchFileAge(t, livePath, 999999*time.Second)
+
+	var deleted []string
+	gc := newGcFixture(t, dir, func(pid int) bool { return pid == 2587999 }, &deleted)
+	gc.CollectNow()
+
+	for _, p := range paths {
+		expectDeleted(t, p)
+	}
+	expectKept(t, livePath)
+}

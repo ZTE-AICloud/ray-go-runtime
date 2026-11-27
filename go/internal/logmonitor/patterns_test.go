@@ -94,9 +94,10 @@ func TestParseWorkerFilenamePIDRangeValidation(t *testing.T) {
 	}{
 		{name: "pid zero", path: "worker-abc123-0", ok: false},
 		{name: "pid negative", path: "worker-abc123--5", ok: false},
-		{name: "pid equal upper bound", path: "worker-abc123-1000000", ok: false},
-		{name: "pid above upper bound", path: "worker-abc123-1000001", ok: false},
-		{name: "pid just below upper bound", path: "worker-abc123-999999", ok: true, pid: 999999},
+		{name: "pid above 1M (modern Linux pid_max)", path: "worker-abc123-2587181", ok: true, pid: 2587181},
+		{name: "pid equal default upper bound", path: "worker-abc123-4194305", ok: false},
+		{name: "pid timestamp rejected", path: "worker-abc123-1700000000", ok: false},
+		{name: "pid just below old bound", path: "worker-abc123-999999", ok: true, pid: 999999},
 		{name: "pid in range", path: "worker-abc123-12345", ok: true, pid: 12345},
 		{name: "pid not numeric", path: "worker-abc123-abc", ok: false},
 	}

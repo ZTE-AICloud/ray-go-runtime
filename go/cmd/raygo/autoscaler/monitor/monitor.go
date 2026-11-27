@@ -18,19 +18,26 @@
 package monitor
 
 import (
+	"context"
 	"fmt"
 	"os"
 
 	v2 "github.com/ray-project/ray/go/internal/autoscaler/v2"
 	"github.com/ray-project/ray/go/internal/autoscaler/v2/constant"
 	"github.com/ray-project/ray/go/internal/common"
+	grpcgcs "github.com/ray-project/ray/go/internal/gcs/grpc"
 	"github.com/ray-project/ray/go/pkg/gcs"
 	"github.com/ray-project/ray/go/pkg/ids"
 	"github.com/ray-project/ray/go/pkg/log"
 	"github.com/ray-project/ray/go/pkg/log/logconfig"
-	"github.com/ray-project/ray/go/pkg/runtime/plugin"
 	"github.com/spf13/cobra"
 )
+
+// newGCSClientFn creates the pure-Go GCS gRPC client (no go_runtime.so); tests
+// can replace it with a fake.
+var newGCSClientFn = func(ctx context.Context, opts gcs.ClientOptions) (gcs.Client, error) {
+	return grpcgcs.NewClient(ctx, opts)
+}
 
 // MonitorCmd represents the monitor subcommand.
 var MonitorCmd = &cobra.Command{
@@ -157,15 +164,9 @@ func runMonitor(cmd *cobra.Command, args []string) (err error) {
 		"log_dir", config.LogsDir,
 		"monitor_ip", config.MonitorIP)
 
-	// Fail fast on deployment errors (missing/invalid go_runtime.so).
-	if err := plugin.CheckPluginLoadable(); err != nil {
-		v2.CustomErrorHook(err)
-		return err
-	}
-
-	// Build the GCS client through the plugin export surface and reuse the same
-	// instance for the config reader and the monitor (one-process-one-client).
-	gcsClient, err := plugin.LoadGCSClient(gcs.ClientOptions{
+	// Build the pure-Go GCS gRPC client (no go_runtime.so required) and reuse
+	// the same instance for the config reader and the monitor.
+	gcsClient, err := newGCSClientFn(context.Background(), gcs.ClientOptions{
 		Address:   config.GcsAddress,
 		ClusterID: ids.NilClusterID(),
 		TimeoutMs: 10000,

@@ -26,6 +26,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/ray-project/ray/go/internal/common"
@@ -35,17 +36,28 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	gproto "google.golang.org/protobuf/proto"
 )
 
-// Client is a pure-Go GCS gRPC client. It satisfies gcs.LogBatchPublisher,
-// gcs.ErrorInfoPublisher, gcs.NodeResourceUsagePublisher and the
-// plugin.GCSHandshakeClient subset (GetNodeToConnect / NextJobID).
+// Compile-time interface assertions.
+var (
+	_ gcs.Client              = (*Client)(nil)
+	_ gcs.RuntimeEnvURIPinner = (*Client)(nil)
+)
+
+// Client is a pure-Go GCS gRPC client. It satisfies gcs.Client,
+// gcs.RuntimeEnvURIPinner, gcs.LogBatchPublisher, gcs.ErrorInfoPublisher,
+// gcs.NodeResourceUsagePublisher, and the plugin.GCSHandshakeClient subset.
 type Client struct {
 	conn       *grpc.ClientConn
 	clusterID  string
+	rpcTimeout time.Duration
 	kv         proto.InternalKVGcsServiceClient
 	pubsub     proto.ObservabilityPubSubServiceClient
 	runtimeEnv proto.RuntimeEnvGcsServiceClient
+	autoscaler proto.AutoscalerStateServiceClient
+	nodeInfo   proto.NodeInfoGcsServiceClient
+	closed     atomic.Bool
 }
 
 // NewClient dials GCS and initializes the KV and pubsub service clients.
@@ -82,10 +94,22 @@ func NewClient(ctx context.Context, opts gcs.ClientOptions) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dial GCS %s: %w", opts.Address, err)
 	}
+	// A nil ClusterID must be sent as no metadata at all: AppendClusterID omits
+	// the header only for "", whereas NilClusterID().Hex() is 56 'f' chars and
+	// would be rejected by GCS cluster-ID auth (Unauthenticated/WrongClusterID).
+	clusterID := ""
+	if !opts.ClusterID.IsNil() {
+		clusterID = opts.ClusterID.Hex()
+	}
+	var rpcTimeout time.Duration
+	if opts.TimeoutMs > 0 {
+		rpcTimeout = time.Duration(opts.TimeoutMs) * time.Millisecond
+	}
 	return &Client{
-		conn:      conn,
-		clusterID: opts.ClusterID.Hex(),
-		kv:        proto.NewInternalKVGcsServiceClient(conn),
+		conn:       conn,
+		clusterID:  clusterID,
+		rpcTimeout: rpcTimeout,
+		kv:         proto.NewInternalKVGcsServiceClient(conn),
 		// The GCS server registers ObservabilityPubSubService
 		// (src/ray/gcs/grpc_services.cc), the same service the Python
 		// subscriber uses. InternalPubSubGcsService exists only in the proto
@@ -93,6 +117,8 @@ func NewClient(ctx context.Context, opts gcs.ClientOptions) (*Client, error) {
 		// through it fails with Unimplemented.
 		pubsub:     proto.NewObservabilityPubSubServiceClient(conn),
 		runtimeEnv: proto.NewRuntimeEnvGcsServiceClient(conn),
+		autoscaler: proto.NewAutoscalerStateServiceClient(conn),
+		nodeInfo:   proto.NewNodeInfoGcsServiceClient(conn),
 	}, nil
 }
 
@@ -100,12 +126,22 @@ func (c *Client) withClusterID(ctx context.Context) context.Context {
 	return gcs.AppendClusterID(ctx, c.clusterID)
 }
 
+func (c *Client) withCallContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx = c.withClusterID(ctx)
+	if _, ok := ctx.Deadline(); !ok && c.rpcTimeout > 0 {
+		return context.WithTimeout(ctx, c.rpcTimeout)
+	}
+	return ctx, func() {}
+}
+
 // Get reads a value from the GCS internal KV store, mapping a missing key to
 // gcs.ErrKeyNotFound. The GCS server normally reports it as ray::StatusCode
 // NotFound encoded in reply.Status.Code with an OK transport; a gRPC NOT_FOUND
 // status is mapped the same way for servers that use the transport instead.
 func (c *Client) Get(ctx context.Context, ns, key string) ([]byte, error) {
-	reply, err := c.kv.InternalKVGet(c.withClusterID(ctx), &proto.InternalKVGetRequest{
+	callCtx, cancel := c.withCallContext(ctx)
+	defer cancel()
+	reply, err := c.kv.InternalKVGet(callCtx, &proto.InternalKVGetRequest{
 		Namespace: []byte(ns),
 		Key:       []byte(key),
 	})
@@ -155,7 +191,199 @@ func (c *Client) PublishLogBatch(ctx context.Context, payload gcs.LogBatchPayloa
 }
 
 // Close closes the underlying gRPC connection.
-func (c *Client) Close() error { return c.conn.Close() }
+func (c *Client) Close() error {
+	c.closed.Store(true)
+	return c.conn.Close()
+}
+
+// IsClosed reports whether Close has been called.
+func (c *Client) IsClosed() bool { return c.closed.Load() }
+
+// MultiGet reads multiple keys from the GCS internal KV store.
+func (c *Client) MultiGet(ctx context.Context, ns string, keys []string) (map[string][]byte, error) {
+	rawKeys := make([][]byte, len(keys))
+	for i, k := range keys {
+		rawKeys[i] = []byte(k)
+	}
+	callCtx, cancel := c.withCallContext(ctx)
+	defer cancel()
+	reply, err := c.kv.InternalKVMultiGet(callCtx, &proto.InternalKVMultiGetRequest{
+		Namespace: []byte(ns),
+		Keys:      rawKeys,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("internal kv multi_get %s: %w", ns, err)
+	}
+	if err := kvStatusErr(fmt.Sprintf("internal kv multi_get %s", ns), reply.Status); err != nil {
+		return nil, err
+	}
+	out := make(map[string][]byte, len(reply.Results))
+	for _, entry := range reply.Results {
+		out[string(entry.Key)] = entry.Value
+	}
+	return out, nil
+}
+
+// Exists checks whether key exists in the GCS internal KV store.
+func (c *Client) Exists(ctx context.Context, ns, key string) (bool, error) {
+	callCtx, cancel := c.withCallContext(ctx)
+	defer cancel()
+	reply, err := c.kv.InternalKVExists(callCtx, &proto.InternalKVExistsRequest{
+		Namespace: []byte(ns),
+		Key:       []byte(key),
+	})
+	if err != nil {
+		return false, fmt.Errorf("internal kv exists %s/%s: %w", ns, key, err)
+	}
+	if err := kvStatusErr(fmt.Sprintf("internal kv exists %s/%s", ns, key), reply.Status); err != nil {
+		return false, err
+	}
+	return reply.Exists, nil
+}
+
+// GetAutoscalerStatus fetches the cluster status via AutoscalerStateService.GetClusterStatus.
+func (c *Client) GetAutoscalerStatus(ctx context.Context) (*proto.GetClusterStatusReply, error) {
+	ac := c.autoscaler
+	if ac == nil {
+		ac = proto.NewAutoscalerStateServiceClient(c.conn)
+	}
+	callCtx, cancel := c.withCallContext(ctx)
+	defer cancel()
+	reply, err := ac.GetClusterStatus(callCtx, &proto.GetClusterStatusRequest{})
+	if err != nil {
+		return nil, fmt.Errorf("get cluster status: %w", err)
+	}
+	return reply, nil
+}
+
+// ReportAutoscalingState unmarshals protobuf-serialized AutoscalingState bytes
+// and reports them to GCS via AutoscalerStateService.ReportAutoscalingState.
+func (c *Client) ReportAutoscalingState(autoscalingState string) error {
+	if len(autoscalingState) == 0 {
+		return fmt.Errorf("autoscaling state must not be empty")
+	}
+	var state proto.AutoscalingState
+	if err := gproto.Unmarshal([]byte(autoscalingState), &state); err != nil {
+		return fmt.Errorf("unmarshal autoscaling state: %w", err)
+	}
+	ac := c.autoscaler
+	if ac == nil {
+		ac = proto.NewAutoscalerStateServiceClient(c.conn)
+	}
+	timeout := c.rpcTimeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if _, err := ac.ReportAutoscalingState(c.withClusterID(ctx), &proto.ReportAutoscalingStateRequest{
+		AutoscalingState: &state,
+	}); err != nil {
+		return fmt.Errorf("report autoscaling state: %w", err)
+	}
+	return nil
+}
+
+// DrainNode requests GCS AutoscalerStateService to drain a single node.
+func (c *Client) DrainNode(
+	ctx context.Context,
+	nodeID ids.NodeID,
+	reason proto.DrainNodeReason,
+	reasonMessage string,
+	deadlineTimestampMs int64,
+) (bool, string, error) {
+	ac := c.autoscaler
+	if ac == nil {
+		ac = proto.NewAutoscalerStateServiceClient(c.conn)
+	}
+	callCtx, cancel := c.withCallContext(ctx)
+	defer cancel()
+	reply, err := ac.DrainNode(callCtx, &proto.DrainNodeRequest{
+		NodeId:              nodeID.Binary(),
+		Reason:              reason,
+		ReasonMessage:       reasonMessage,
+		DeadlineTimestampMs: deadlineTimestampMs,
+	})
+	if err != nil {
+		return false, "", fmt.Errorf("drain node %s: %w", nodeID.Hex(), err)
+	}
+	return reply.GetIsAccepted(), reply.GetRejectionReasonMessage(), nil
+}
+
+// DrainNodes requests GCS NodeInfoGcsService to drain a batch of nodes.
+func (c *Client) DrainNodes(ctx context.Context, nodeIDs []ids.NodeID) ([]ids.NodeID, error) {
+	if len(nodeIDs) == 0 {
+		return nil, nil
+	}
+	nc := c.nodeInfo
+	if nc == nil {
+		nc = proto.NewNodeInfoGcsServiceClient(c.conn)
+	}
+	data := make([]*proto.DrainNodeData, len(nodeIDs))
+	for i, id := range nodeIDs {
+		data[i] = &proto.DrainNodeData{NodeId: id.Binary()}
+	}
+	callCtx, cancel := c.withCallContext(ctx)
+	defer cancel()
+	reply, err := nc.DrainNode(callCtx, &proto.GcsDrainNodeRequest{
+		DrainNodeData: data,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("drain nodes: %w", err)
+	}
+	if err := nodeInfoStatusErr("drain nodes", reply.GetStatus()); err != nil {
+		return nil, err
+	}
+	drained := make([]ids.NodeID, 0, len(reply.GetDrainNodeStatus()))
+	for _, st := range reply.GetDrainNodeStatus() {
+		id, err := ids.NodeIDFromBinary(st.GetNodeId())
+		if err != nil {
+			continue
+		}
+		drained = append(drained, id)
+	}
+	return drained, nil
+}
+
+// ListJobs lists all jobs from GCS via ListJobsWithFilter.
+func (c *Client) ListJobs(ctx context.Context) ([]*proto.JobTableData, error) {
+	return c.ListJobsWithFilter(ctx, "", false, false)
+}
+
+// Unused gcs.Client interface methods return gcs.ErrNotImplemented.
+func (c *Client) GetAvailableResources(context.Context, ids.NodeID) (*proto.AvailableResources, error) {
+	return nil, gcs.ErrNotImplemented
+}
+func (c *Client) GetTotalResources(context.Context, ids.NodeID) (*proto.TotalResources, error) {
+	return nil, gcs.ErrNotImplemented
+}
+func (c *Client) GetActorInfo(context.Context, ids.ActorID) (*proto.ActorTableData, error) {
+	return nil, gcs.ErrNotImplemented
+}
+func (c *Client) ListActors(context.Context, *ids.JobID) ([]*proto.ActorTableData, error) {
+	return nil, gcs.ErrNotImplemented
+}
+func (c *Client) ListActorsByFilter(context.Context, *ids.JobID, *gcs.ActorStateName) ([]*proto.ActorTableData, error) {
+	return nil, gcs.ErrNotImplemented
+}
+func (c *Client) GetJobInfo(context.Context, ids.JobID) (*proto.JobTableData, error) {
+	return nil, gcs.ErrNotImplemented
+}
+func (c *Client) GetWorkerInfo(context.Context, ids.WorkerID) (*proto.WorkerTableData, error) {
+	return nil, gcs.ErrNotImplemented
+}
+func (c *Client) ListWorkers(context.Context) ([]*proto.WorkerTableData, error) {
+	return nil, gcs.ErrNotImplemented
+}
+func (c *Client) GetPlacementGroup(context.Context, ids.PlacementGroupID) (*proto.PlacementGroupTableData, error) {
+	return nil, gcs.ErrNotImplemented
+}
+func (c *Client) GetPlacementGroupByName(context.Context, string, string) (*proto.PlacementGroupTableData, error) {
+	return nil, gcs.ErrNotImplemented
+}
+func (c *Client) ListPlacementGroups(context.Context) ([]*proto.PlacementGroupTableData, error) {
+	return nil, gcs.ErrNotImplemented
+}
 
 // PinRuntimeEnvURI pins a runtime environment package URI in GCS for
 // expirationS seconds via RuntimeEnvGcsService.PinRuntimeEnvURI.
@@ -166,7 +394,9 @@ func (c *Client) PinRuntimeEnvURI(ctx context.Context, uri string, expirationS i
 	if expirationS < 0 || expirationS > math.MaxInt32 {
 		return fmt.Errorf("pin runtime env uri %q: invalid expiration %d", uri, expirationS)
 	}
-	reply, err := c.runtimeEnv.PinRuntimeEnvURI(c.withClusterID(ctx), &proto.PinRuntimeEnvURIRequest{
+	callCtx, cancel := c.withCallContext(ctx)
+	defer cancel()
+	reply, err := c.runtimeEnv.PinRuntimeEnvURI(callCtx, &proto.PinRuntimeEnvURIRequest{
 		Uri:         uri,
 		ExpirationS: int32(expirationS),
 	})

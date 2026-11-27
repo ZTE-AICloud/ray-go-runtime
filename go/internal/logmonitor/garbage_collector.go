@@ -20,6 +20,8 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/ray-project/ray/go/internal/common"
@@ -27,7 +29,7 @@ import (
 )
 
 // File patterns scanned per directory. These are the log file families the
-// Python and C++ core processes write, grouped as the collector treats them.
+// Python, C++, Java, and Go core processes write, grouped as the collector treats them.
 var (
 	gcFilePatterns = []string{
 		"job-driver-*.log*",
@@ -35,6 +37,9 @@ var (
 		"python-core-worker-*.log*",
 		"cpp-core-driver-*.log*",
 		"cpp-core-worker-*.log*",
+		"go-core-driver-*.log*",
+		"go-core-worker-*.log*",
+		"ray_go_*.log*",
 		"runtime_env_setup-*.log*",
 		"worker-*.out*",
 		"worker-*.err*",
@@ -51,10 +56,36 @@ var (
 	exportEventFilePatterns = []string{"event_EXPORT_*.log*"}
 )
 
-// maxValidGCPID is the exclusive upper bound for candidate PIDs. Linux caps
-// pid_max well below this, so a larger number is a timestamp or an offset
-// captured by a loose pattern, not a process.
-const maxValidGCPID = 1000000
+// defaultMaxValidGCPID is the exclusive upper bound fallback for candidate PIDs
+// (Linux 64-bit PID_MAX_LIMIT = 4194304). Real systems can exceed 1,000,000,
+// while timestamps (10-digit epoch seconds) remain far above this bound.
+const defaultMaxValidGCPID = 4194304 + 1
+
+var (
+	detectedMaxPIDOnce sync.Once
+	detectedMaxPID     = defaultMaxValidGCPID
+)
+
+// maxValidPIDFn returns the exclusive upper bound for valid process PIDs.
+// Overridable in tests.
+var maxValidPIDFn = func() int {
+	detectedMaxPIDOnce.Do(func() {
+		raw, err := os.ReadFile("/proc/sys/kernel/pid_max")
+		if err != nil {
+			return
+		}
+		v, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+		if err == nil && v > 0 {
+			// Accept up to v (inclusive), so exclusive bound is v+1, floored at
+			// defaultMaxValidGCPID so cross-host log fixtures with PIDs up to
+			// 4194304 are also accepted.
+			if v+1 > detectedMaxPID {
+				detectedMaxPID = v + 1
+			}
+		}
+	})
+	return detectedMaxPID
+}
 
 // PID extraction patterns, one per log file family. The capture group index
 // is the group holding the PID; it differs per pattern because the families
@@ -67,6 +98,9 @@ var gcPIDPatterns = []struct {
 	{regexp.MustCompile(`python-core-worker-[0-9a-f_]+_(\d+)\.log`), 1},
 	{regexp.MustCompile(`cpp-core-driver-[0-9a-f_]+_(\d+)\.log`), 1},
 	{regexp.MustCompile(`cpp-core-worker-[0-9a-f_]+_(\d+)\.log`), 1},
+	{regexp.MustCompile(`go-core-driver-[0-9a-f_]+_(\d+)\.log`), 1},
+	{regexp.MustCompile(`go-core-worker-[0-9a-f_]+_(\d+)\.log`), 1},
+	{regexp.MustCompile(`ray_go_(\d+)\.log`), 1},
 	// The GC worker regex requires the filename to start with "worker"
 	// (mirroring C++ ExtractCandidatePid), which is narrower than
 	// patterns.go's workerLogPattern (.*worker.*, used for Monitor tracking).
@@ -181,29 +215,27 @@ func (g *GarbageCollector) CollectNow() {
 func (g *GarbageCollector) scanDirectory(dirPath string, patterns []string) []gcCandidate {
 	var candidates []gcCandidate
 
-	paths, err := readdirPaths(dirPath)
+	entries, err := readDirEntries(dirPath)
 	if err != nil {
 		return candidates
 	}
 
-	for _, p := range paths {
-		base := filepath.Base(p)
-		if !matchesAnyPattern(base, patterns) {
+	for _, e := range entries {
+		if !matchesAnyPattern(e.name, patterns) {
 			continue
 		}
-		// Lstat, not Stat: a symlinked log entry is left alone rather than
-		// followed to whatever it points at. Deleting through a link would
-		// remove a file this collector never scanned, so the deviation from
-		// the reference implementation's stat-based glob is deliberate.
-		fileInfo, err := os.Lstat(p)
+		// d_type is not reported by every filesystem (DT_UNKNOWN -> ModeIrregular),
+		// so Lstat all pattern matches; the IsRegular check below excludes
+		// symlinks (Lstat semantics) and non-regular files.
+		fileInfo, err := os.Lstat(e.path)
 		if err != nil || !fileInfo.Mode().IsRegular() {
 			continue
 		}
 		candidates = append(candidates, gcCandidate{
-			path:  p,
+			path:  e.path,
 			mtime: fileInfo.ModTime(),
 			size:  fileInfo.Size(),
-			pid:   extractCandidatePID(base),
+			pid:   extractCandidatePID(e.name),
 		})
 	}
 	return candidates
@@ -219,9 +251,10 @@ func matchesAnyPattern(name string, patterns []string) bool {
 }
 
 // extractCandidatePID returns the PID embedded in a log filename, or nil if
-// none matches or the value is out of the valid range (0 < pid < 1000000).
+// none matches or the value is out of the valid range (0 < pid < maxValidPIDFn()).
 // job-driver-* and runtime_env_setup-* files carry no PID.
 func extractCandidatePID(filename string) *int {
+	maxPID := maxValidPIDFn()
 	for _, pp := range gcPIDPatterns {
 		match := pp.re.FindStringSubmatch(filename)
 		if match == nil {
@@ -231,7 +264,7 @@ func extractCandidatePID(filename string) *int {
 		if err != nil {
 			return nil
 		}
-		if pid > 0 && pid < maxValidGCPID {
+		if pid > 0 && pid < maxPID {
 			return &pid
 		}
 	}

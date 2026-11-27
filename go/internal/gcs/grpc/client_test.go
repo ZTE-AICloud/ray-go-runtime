@@ -30,6 +30,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	gproto "google.golang.org/protobuf/proto"
 )
 
 type fakeGCS struct {
@@ -38,6 +39,8 @@ type fakeGCS struct {
 	proto.UnimplementedNodeInfoGcsServiceServer
 	proto.UnimplementedJobInfoGcsServiceServer
 	proto.UnimplementedRayEventExportGcsServiceServer
+	proto.UnimplementedRuntimeEnvGcsServiceServer
+	proto.UnimplementedAutoscalerStateServiceServer
 	gotAddEvents *proto.AddEventsRequest
 	addEventsErr error
 	kvValue      []byte
@@ -61,6 +64,15 @@ type fakeGCS struct {
 	jobInfoStatus    *proto.GcsStatus
 	jobInfoList      []*proto.JobTableData
 	nextJobID        int32
+
+	kvExists            bool
+	pinnedURI           string
+	pinnedExp           int32
+	reportedState       *proto.AutoscalingState
+	clusterStatusReply  *proto.GetClusterStatusReply
+	drainAccepted       bool
+	drainRejection      string
+	drainedNodeStatuses []*proto.DrainNodeStatus
 	gotGetAllNode    *proto.GetAllNodeInfoRequest
 	gotCheckAlive    *proto.CheckAliveRequest
 	gotGetAllJobInfo *proto.GetAllJobInfoRequest
@@ -146,6 +158,64 @@ func (f *fakeGCS) GcsPublish(ctx context.Context, req *proto.GcsPublishRequest) 
 	return &proto.GcsPublishReply{Status: &proto.GcsStatus{Code: 0}}, nil
 }
 
+func (f *fakeGCS) InternalKVExists(ctx context.Context, req *proto.InternalKVExistsRequest) (*proto.InternalKVExistsReply, error) {
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		f.gotMD = md
+	}
+	return &proto.InternalKVExistsReply{Status: f.kvStatus, Exists: f.kvExists}, nil
+}
+
+func (f *fakeGCS) InternalKVMultiGet(ctx context.Context, req *proto.InternalKVMultiGetRequest) (*proto.InternalKVMultiGetReply, error) {
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		f.gotMD = md
+	}
+	var results []*proto.MapFieldEntry
+	for _, k := range req.Keys {
+		results = append(results, &proto.MapFieldEntry{Key: k, Value: f.kvValue})
+	}
+	return &proto.InternalKVMultiGetReply{Status: f.kvStatus, Results: results}, nil
+}
+
+func (f *fakeGCS) PinRuntimeEnvURI(ctx context.Context, req *proto.PinRuntimeEnvURIRequest) (*proto.PinRuntimeEnvURIReply, error) {
+	f.pinnedURI = req.Uri
+	f.pinnedExp = req.ExpirationS
+	return &proto.PinRuntimeEnvURIReply{Status: f.kvStatus}, nil
+}
+
+func (f *fakeGCS) GetClusterStatus(ctx context.Context, _ *proto.GetClusterStatusRequest) (*proto.GetClusterStatusReply, error) {
+	if f.clusterStatusReply != nil {
+		return f.clusterStatusReply, nil
+	}
+	return &proto.GetClusterStatusReply{}, nil
+}
+
+func (f *fakeGCS) ReportAutoscalingState(ctx context.Context, req *proto.ReportAutoscalingStateRequest) (*proto.ReportAutoscalingStateReply, error) {
+	f.reportedState = req.GetAutoscalingState()
+	return &proto.ReportAutoscalingStateReply{}, nil
+}
+
+func (f *fakeGCS) DrainNode(ctx context.Context, req *proto.DrainNodeRequest) (*proto.DrainNodeReply, error) {
+	return &proto.DrainNodeReply{
+		IsAccepted:             f.drainAccepted,
+		RejectionReasonMessage: f.drainRejection,
+	}, nil
+}
+
+func (f *fakeGCS) startDrainBatch(ctx context.Context, req *proto.GcsDrainNodeRequest) (*proto.GcsDrainNodeReply, error) {
+	return &proto.GcsDrainNodeReply{
+		Status:          f.nodeInfoStatus,
+		DrainNodeStatus: f.drainedNodeStatuses,
+	}, nil
+}
+
+type fakeNodeInfoDrain struct {
+	*fakeGCS
+}
+
+func (f *fakeNodeInfoDrain) DrainNode(ctx context.Context, req *proto.GcsDrainNodeRequest) (*proto.GcsDrainNodeReply, error) {
+	return f.startDrainBatch(ctx, req)
+}
+
 func startMockGCS(t *testing.T, f *fakeGCS) string {
 	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
@@ -155,9 +225,11 @@ func startMockGCS(t *testing.T, f *fakeGCS) string {
 	server := grpc.NewServer()
 	proto.RegisterInternalKVGcsServiceServer(server, f)
 	proto.RegisterObservabilityPubSubServiceServer(server, f)
-	proto.RegisterNodeInfoGcsServiceServer(server, f)
+	proto.RegisterNodeInfoGcsServiceServer(server, &fakeNodeInfoDrain{f})
 	proto.RegisterJobInfoGcsServiceServer(server, f)
 	proto.RegisterRayEventExportGcsServiceServer(server, f)
+	proto.RegisterRuntimeEnvGcsServiceServer(server, f)
+	proto.RegisterAutoscalerStateServiceServer(server, f)
 	go func() { _ = server.Serve(lis) }()
 	t.Cleanup(server.Stop)
 	return lis.Addr().String()
@@ -172,7 +244,14 @@ func newTestClient(t *testing.T, f *fakeGCS) *Client {
 		t.Fatalf("dial: %v", err)
 	}
 	t.Cleanup(func() { _ = cc.Close() })
-	return &Client{conn: cc, kv: proto.NewInternalKVGcsServiceClient(cc), pubsub: proto.NewObservabilityPubSubServiceClient(cc)}
+	return &Client{
+		conn:       cc,
+		kv:         proto.NewInternalKVGcsServiceClient(cc),
+		pubsub:     proto.NewObservabilityPubSubServiceClient(cc),
+		runtimeEnv: proto.NewRuntimeEnvGcsServiceClient(cc),
+		autoscaler: proto.NewAutoscalerStateServiceClient(cc),
+		nodeInfo:   proto.NewNodeInfoGcsServiceClient(cc),
+	}
 }
 
 func TestGetNotFound(t *testing.T) {
@@ -304,6 +383,93 @@ func TestPutDelKeysWireFormat(t *testing.T) {
 	f.kvStatus = &proto.GcsStatus{Code: gcs.StatusNotFoundCode, Message: "missing"}
 	if _, err := c.Del(context.Background(), "ns", "k", false); !errors.Is(err, gcs.ErrKeyNotFound) {
 		t.Fatalf("Del() error = %v, want gcs.ErrKeyNotFound", err)
+	}
+}
+
+func TestExistsMultiGetPinAndAutoscalerRPCs(t *testing.T) {
+	nodeID, err := ids.NodeIDFromHex(strings.Repeat("11", 28))
+	if err != nil {
+		t.Fatalf("NodeIDFromHex: %v", err)
+	}
+	f := &fakeGCS{
+		kvExists:           true,
+		kvValue:            []byte("val"),
+		clusterStatusReply: &proto.GetClusterStatusReply{AutoscalingState: &proto.AutoscalingState{AutoscalerStateVersion: 7}},
+		drainAccepted:      true,
+		drainedNodeStatuses: []*proto.DrainNodeStatus{
+			{NodeId: nodeID.Binary()},
+		},
+	}
+	c := newTestClient(t, f)
+	ctx := context.Background()
+
+	if ok, err := c.Exists(ctx, "ns", "k"); err != nil || !ok {
+		t.Fatalf("Exists() = (%v, %v), want (true, nil)", ok, err)
+	}
+	m, err := c.MultiGet(ctx, "ns", []string{"k1", "k2"})
+	if err != nil || string(m["k1"]) != "val" || string(m["k2"]) != "val" {
+		t.Fatalf("MultiGet() = (%v, %v)", m, err)
+	}
+	if err := c.PinRuntimeEnvURI(ctx, "gcs://pkg.zip", 120); err != nil {
+		t.Fatalf("PinRuntimeEnvURI: %v", err)
+	}
+	if f.pinnedURI != "gcs://pkg.zip" || f.pinnedExp != 120 {
+		t.Fatalf("pinned = (%q, %d), want (gcs://pkg.zip, 120)", f.pinnedURI, f.pinnedExp)
+	}
+	if err := c.PinRuntimeEnvURI(ctx, "gcs://pkg.zip", -1); err == nil {
+		t.Fatal("PinRuntimeEnvURI(-1) = nil, want range error")
+	}
+
+	st, err := c.GetAutoscalerStatus(ctx)
+	if err != nil || st.GetAutoscalingState().GetAutoscalerStateVersion() != 7 {
+		t.Fatalf("GetAutoscalerStatus = (%+v, %v)", st, err)
+	}
+	rawState, err := gproto.Marshal(&proto.AutoscalingState{AutoscalerStateVersion: 9})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if err := c.ReportAutoscalingState(string(rawState)); err != nil {
+		t.Fatalf("ReportAutoscalingState: %v", err)
+	}
+	if f.reportedState.GetAutoscalerStateVersion() != 9 {
+		t.Fatalf("reported version = %d, want 9", f.reportedState.GetAutoscalerStateVersion())
+	}
+	if err := c.ReportAutoscalingState(""); err == nil {
+		t.Fatal("ReportAutoscalingState(empty) = nil, want error")
+	}
+
+	accepted, reject, err := c.DrainNode(ctx, nodeID, proto.DrainNodeReason_DRAIN_NODE_REASON_IDLE_TERMINATION, "idle", 0)
+	if err != nil || !accepted || reject != "" {
+		t.Fatalf("DrainNode = (%v, %q, %v)", accepted, reject, err)
+	}
+	drained, err := c.DrainNodes(ctx, []ids.NodeID{nodeID})
+	if err != nil || len(drained) != 1 || drained[0] != nodeID {
+		t.Fatalf("DrainNodes = (%v, %v)", drained, err)
+	}
+}
+
+func TestNewClientNilClusterIDOmitsMetadata(t *testing.T) {
+	f := &fakeGCS{kvExists: true}
+	addr := startMockGCS(t, f)
+
+	c, err := NewClient(context.Background(), gcs.ClientOptions{
+		Address:   addr,
+		ClusterID: ids.NilClusterID(),
+		TimeoutMs: 5000,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+
+	if _, err := c.Exists(context.Background(), "ns", "k"); err != nil {
+		t.Fatalf("Exists: %v", err)
+	}
+	if got := f.gotMD.Get("ray_cluster_id"); len(got) != 0 {
+		t.Fatalf("ray_cluster_id metadata = %v, want empty for NilClusterID", got)
+	}
+	if c.rpcTimeout != 5*time.Second {
+		t.Fatalf("rpcTimeout = %v, want 5s", c.rpcTimeout)
 	}
 }
 
