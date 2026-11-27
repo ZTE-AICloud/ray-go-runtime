@@ -43,6 +43,7 @@ type Monitor struct {
 	runtimeEnvToDriver     bool
 	autoscalerV2Enabled    bool
 	lastFilenameUpdateTime time.Time
+	lastScannedDirEntries  int
 	lastPublishErrLog      time.Time
 	isProcAlive            func(pid int) bool
 	gc                     *GarbageCollector
@@ -155,7 +156,7 @@ func (m *Monitor) Run(ctx context.Context) error {
 }
 
 func (m *Monitor) shouldUpdateFilenames(now time.Time) bool {
-	if len(m.tracked) < m.manyFilesThreshold {
+	if len(m.tracked) < m.manyFilesThreshold && m.lastScannedDirEntries < m.manyFilesThreshold {
 		return true
 	}
 	return now.Sub(m.lastFilenameUpdateTime) > m.nameUpdateInterval
@@ -168,22 +169,33 @@ func (m *Monitor) updateLogFilenames() error {
 	tpuDirInfo, err := os.Stat(filepath.Join(m.logsDir, "tpu_logs"))
 	tpuDirExists := err == nil && tpuDirInfo.IsDir()
 
-	candidates, err := orderedLogPaths(m.logsDir, m.autoscalerV2Enabled, m.runtimeEnvToDriver, tpuDirExists)
+	candidates, totalEntries, err := orderedLogPaths(m.logsDir, m.autoscalerV2Enabled, m.runtimeEnvToDriver, tpuDirExists)
 	if err != nil {
 		return err
 	}
-	for _, path := range candidates {
-		info, err := os.Stat(path)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return err
-		}
-		if !info.Mode().IsRegular() && info.Mode()&fs.ModeSymlink == 0 {
+	m.lastScannedDirEntries = totalEntries
+
+	for _, c := range candidates {
+		path := c.path
+		if _, exists := m.tracked[path]; exists {
 			continue
 		}
-		if _, exists := m.tracked[path]; exists {
+		// Skip os.Stat when ReadDir already reported a regular file (typ == 0
+		// with fromDir == true). For synthetic paths (fromDir == false, e.g.
+		// monitor.log) or symlinks, fall back to os.Stat.
+		if !c.fromDir || c.typ&fs.ModeSymlink != 0 {
+			info, err := os.Stat(path)
+			if err != nil {
+				if os.IsNotExist(err) {
+					continue
+				}
+				return err
+			}
+			if !info.Mode().IsRegular() && info.Mode()&fs.ModeSymlink == 0 {
+				continue
+			}
+		} else if c.typ != 0 {
+			// Non-regular, non-symlink entry from ReadDir (e.g. directory, FIFO).
 			continue
 		}
 

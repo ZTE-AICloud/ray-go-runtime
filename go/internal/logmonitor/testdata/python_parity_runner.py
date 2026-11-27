@@ -52,6 +52,27 @@ def install_stubs():
     ray_logging_module = types.ModuleType("ray._private.ray_logging")
     ray_logging_module.setup_component_logger = lambda *args, **kwargs: None
 
+    gcs_passive_utils = types.ModuleType("ray._private.gcs_passive_utils")
+
+    class PassiveLatch:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def wait_if_passive(self, *args, **kwargs):
+            return False
+
+        def set_passive(self, *args, **kwargs):
+            pass
+
+        def promoted(self, *args, **kwargs):
+            pass
+
+        def demoted(self, *args, **kwargs):
+            pass
+
+    gcs_passive_utils.PassiveLatch = PassiveLatch
+    gcs_passive_utils.is_refused_by_passive_gcs = lambda *args, **kwargs: False
+
     raylet_module = types.ModuleType("ray._raylet")
 
     class GcsClient:
@@ -66,6 +87,7 @@ def install_stubs():
     sys.modules["ray._private.utils"] = utils_module
     sys.modules["ray._private.logging_utils"] = logging_utils_module
     sys.modules["ray._private.ray_logging"] = ray_logging_module
+    sys.modules["ray._private.gcs_passive_utils"] = gcs_passive_utils
     sys.modules["ray._raylet"] = raylet_module
 
 

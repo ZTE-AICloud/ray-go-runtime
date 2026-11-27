@@ -15,6 +15,7 @@
 package logmonitor
 
 import (
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -79,7 +80,7 @@ func parseWorkerFilename(path string) (string, *int, bool) {
 	if err != nil {
 		return "", nil, false
 	}
-	if pidValue <= 0 || pidValue >= maxValidGCPID {
+	if pidValue <= 0 || pidValue >= maxValidPIDFn() {
 		return "", nil, false
 	}
 
@@ -95,40 +96,60 @@ func parseRuntimeEnvFilename(path string) (string, bool) {
 	return match[1], true
 }
 
-func orderedLogPaths(logsDir string, autoscalerV2Enabled bool, runtimeEnvToDriver bool, tpuDirExists bool) ([]string, error) {
-	entries, err := readdirPaths(logsDir)
+type dirEntryPath struct {
+	path    string
+	name    string
+	typ     fs.FileMode
+	fromDir bool
+}
+
+func orderedLogPaths(logsDir string, autoscalerV2Enabled bool, runtimeEnvToDriver bool, tpuDirExists bool) ([]dirEntryPath, int, error) {
+	entries, err := readDirEntries(logsDir)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
-	candidates := make([]string, 0, len(entries))
-	appendMatches := func(pattern string) {
-		for _, entry := range entries {
-			if matchesPath(pattern, filepath.Base(entry)) {
-				candidates = append(candidates, entry)
-			}
+	var workerEntries, javaEntries, rayletEntries, gcsEntries, runtimeEnvEntries []dirEntryPath
+	for _, entry := range entries {
+		name := entry.name
+		switch {
+		case matchesPath("worker*[.out|.err]", name):
+			workerEntries = append(workerEntries, entry)
+		case matchesPath("java-worker*.log", name):
+			javaEntries = append(javaEntries, entry)
+		case matchesPath("raylet*.err", name):
+			rayletEntries = append(rayletEntries, entry)
+		case matchesPath("gcs_server*.err", name):
+			gcsEntries = append(gcsEntries, entry)
+		case runtimeEnvToDriver && matchesPath("runtime_env*.log", name):
+			runtimeEnvEntries = append(runtimeEnvEntries, entry)
 		}
 	}
-	appendMatches("worker*[.out|.err]")
-	appendMatches("java-worker*.log")
-	appendMatches("raylet*.err")
+
+	totalCandidates := len(workerEntries) + len(javaEntries) + len(rayletEntries) + 1 + len(gcsEntries) + len(runtimeEnvEntries)
+	candidates := make([]dirEntryPath, 0, totalCandidates)
+	candidates = append(candidates, workerEntries...)
+	candidates = append(candidates, javaEntries...)
+	candidates = append(candidates, rayletEntries...)
 	if autoscalerV2Enabled {
-		candidates = append(candidates, filepath.Join(logsDir, "events", "event_AUTOSCALER.log"))
+		p := filepath.Join(logsDir, "events", "event_AUTOSCALER.log")
+		candidates = append(candidates, dirEntryPath{path: p, name: "event_AUTOSCALER.log"})
 	} else {
-		candidates = append(candidates, filepath.Join(logsDir, "monitor.log"))
+		p := filepath.Join(logsDir, "monitor.log")
+		candidates = append(candidates, dirEntryPath{path: p, name: "monitor.log"})
 	}
-	appendMatches("gcs_server*.err")
+	candidates = append(candidates, gcsEntries...)
 	if tpuDirExists {
 		tpuEntries, err := readdirPathsRecursive(filepath.Join(logsDir, "tpu_logs"), 32)
 		if err != nil {
-			return nil, err
+			return nil, len(entries), err
 		}
-		candidates = append(candidates, tpuEntries...)
+		for _, p := range tpuEntries {
+			candidates = append(candidates, dirEntryPath{path: p, name: filepath.Base(p), typ: fs.ModeType & 0})
+		}
 	}
-	if runtimeEnvToDriver {
-		appendMatches("runtime_env*.log")
-	}
-	return candidates, nil
+	candidates = append(candidates, runtimeEnvEntries...)
+	return candidates, len(entries), nil
 }
 
 func matchesPath(pattern, name string) bool {
@@ -136,21 +157,29 @@ func matchesPath(pattern, name string) bool {
 	return err == nil && ok
 }
 
-func readdirPaths(dir string) ([]string, error) {
+// readDirEntries reads directory entries using ReadDir(-1) (getdents64 only,
+// zero lstat syscalls) while preserving OS directory order.
+func readDirEntries(dir string) ([]dirEntryPath, error) {
 	handle, err := os.Open(dir)
 	if err != nil {
 		return nil, err
 	}
 	defer handle.Close()
 
-	infos, err := handle.Readdir(-1)
+	entries, err := handle.ReadDir(-1)
 	if err != nil {
 		return nil, err
 	}
 
-	paths := make([]string, 0, len(infos))
-	for _, info := range infos {
-		paths = append(paths, filepath.Join(dir, info.Name()))
+	paths := make([]dirEntryPath, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		paths = append(paths, dirEntryPath{
+			path:    filepath.Join(dir, name),
+			name:    name,
+			typ:     entry.Type(),
+			fromDir: true,
+		})
 	}
 	return paths, nil
 }
